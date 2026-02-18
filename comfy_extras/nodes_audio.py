@@ -8,6 +8,7 @@ import folder_paths
 import os
 import io
 import json
+import tempfile
 import random
 import hashlib
 import node_helpers
@@ -133,10 +134,23 @@ def save_audio(self, audio, filename_prefix="ComfyUI", format="flac", prompt=Non
             if sample_rate != audio["sample_rate"]:
                 waveform = torchaudio.functional.resample(waveform, audio["sample_rate"], sample_rate)
 
-        # Create in-memory WAV buffer
-        wav_buffer = io.BytesIO()
-        torchaudio.save(wav_buffer, waveform, sample_rate, format="WAV")
-        wav_buffer.seek(0)  # Rewind for reading
+        # Create in-memory WAV buffer using a temporary file
+        # (some torchaudio backends don't support BytesIO directly)
+        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as temp_wav:
+            temp_wav_path = temp_wav.name
+        
+        try:
+            # Save to temporary WAV file (use lowercase format)
+            torchaudio.save(temp_wav_path, waveform, sample_rate)
+            
+            # Read it back into memory
+            with open(temp_wav_path, 'rb') as f:
+                wav_data = f.read()
+            wav_buffer = io.BytesIO(wav_data)
+        finally:
+            # Clean up temporary file
+            if os.path.exists(temp_wav_path):
+                os.unlink(temp_wav_path)
 
         # Use PyAV to convert and add metadata
         input_container = av.open(wav_buffer)
@@ -200,7 +214,7 @@ def save_audio(self, audio, filename_prefix="ComfyUI", format="flac", prompt=Non
         })
         counter += 1
 
-    return { "ui": { "audio": results } }
+    return { "ui": { "audios": results } }
 
 class SaveAudio:
     def __init__(self):

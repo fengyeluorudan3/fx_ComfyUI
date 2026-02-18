@@ -142,7 +142,7 @@ class SaveVideo(ComfyNodeABC):
         })
         counter += 1
 
-        return { "ui": { "images": results, "animated": (True,) } }
+        return { "ui": { "videos": results } }
 
 class CreateVideo(ComfyNodeABC):
     @classmethod

@@ -5,8 +5,21 @@ __pycache__/
 !/input/example.png
 /models/
 /temp/
-/custom_nodes/
+/ui-optimize/
+/appold/
+# Ignore all under custom_nodes except these tracked subdirs
+custom_nodes/*
 !custom_nodes/example_node.py.example
+!custom_nodes/ComfyLiterals/
+!custom_nodes/ComfyLiterals/**
+!custom_nodes/ComfyUI-Custom-Scripts/
+!custom_nodes/ComfyUI-Custom-Scripts/**
+!custom_nodes/ComfyUI-Easy-Use/
+!custom_nodes/ComfyUI-Easy-Use/**
+!custom_nodes/ComfyUI-Logic/
+!custom_nodes/ComfyUI-Logic/**
+!custom_nodes/ComfyUI-VideoHelperSuite/
+!custom_nodes/ComfyUI-VideoHelperSuite/**
 extra_model_paths.yaml
 /.vs
 .vscode/
