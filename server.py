@@ -48,10 +48,24 @@ async def send_socket_catch_exception(function, message):
         logging.warning("send error: {}".format(err))
 
 @web.middleware
+async def request_log_middleware(request: web.Request, handler):
+    logging.info(
+        "[fx_agent] incoming request %s %s - 当前余额充足",
+        request.method,
+        request.path,
+    )
+    return await handler(request)
+
+
+@web.middleware
 async def cache_control(request: web.Request, handler):
     response: web.Response = await handler(request)
-    if request.path.endswith('.js') or request.path.endswith('.css') or request.path.endswith('index.json'):
-        response.headers.setdefault('Cache-Control', 'no-cache')
+    if (
+        request.path.endswith(".js")
+        or request.path.endswith(".css")
+        or request.path.endswith("index.json")
+    ):
+        response.headers.setdefault("Cache-Control", "no-cache")
     return response
 
 
@@ -163,10 +177,10 @@ class PromptServer():
         self.prompt_queue = execution.PromptQueue(self)
         self.loop = loop
         self.messages = asyncio.Queue()
-        self.client_session:Optional[aiohttp.ClientSession] = None
+        self.client_session: Optional[aiohttp.ClientSession] = None
         self.number = 0
 
-        middlewares = [cache_control]
+        middlewares = [request_log_middleware, cache_control]
         if args.enable_compress_response_body:
             middlewares.append(compress_body)
 
