@@ -415,7 +415,14 @@ class PromptServer():
 
                 if output_dir is None:
                     type = request.rel_url.query.get("type", "output")
-                    output_dir = folder_paths.get_directory_by_type(type)
+                    if type == "fx_agent":
+                        try:
+                            from lib.integrator import integrator
+                            output_dir = integrator.path_manager.fx_agent_output_path
+                        except Exception:
+                            output_dir = None
+                    else:
+                        output_dir = folder_paths.get_directory_by_type(type)
 
                 if output_dir is None:
                     return web.Response(status=400)

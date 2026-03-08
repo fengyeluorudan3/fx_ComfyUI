@@ -96,8 +96,17 @@ def map_legacy(folder_name: str) -> str:
 if not os.path.exists(input_directory):
     try:
         os.makedirs(input_directory)
-    except:
+    except Exception:
         logging.error("Failed to create input directory")
+
+# Ensure all default model / custom_nodes directories exist for the chosen base_path
+for _name, (_paths, _exts) in folder_names_and_paths.items():
+    for _p in _paths:
+        try:
+            os.makedirs(_p, exist_ok=True)
+        except Exception:
+            # 不影响启动流程，只在日志中提醒
+            logging.warning(f"Failed to create model folder {_p}")
 
 def set_output_directory(output_dir: str) -> None:
     global output_directory
@@ -210,6 +219,11 @@ def exists_annotated_filepath(name) -> bool:
 def add_model_folder_path(folder_name: str, full_folder_path: str, is_default: bool = False) -> None:
     global folder_names_and_paths
     folder_name = map_legacy(folder_name)
+    # 自动创建新增的模型目录，避免用户手动建文件夹
+    try:
+        os.makedirs(full_folder_path, exist_ok=True)
+    except Exception:
+        logging.warning(f"Failed to create model folder {full_folder_path}")
     if folder_name in folder_names_and_paths:
         paths, _exts = folder_names_and_paths[folder_name]
         if full_folder_path in paths:
