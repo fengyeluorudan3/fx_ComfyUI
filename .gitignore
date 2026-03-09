@@ -10,16 +10,10 @@ __pycache__/
 # Ignore all under custom_nodes except these tracked subdirs
 custom_nodes/*
 !custom_nodes/example_node.py.example
-!custom_nodes/ComfyLiterals/
-!custom_nodes/ComfyLiterals/**
-!custom_nodes/ComfyUI-Custom-Scripts/
-!custom_nodes/ComfyUI-Custom-Scripts/**
-!custom_nodes/ComfyUI-Easy-Use/
-!custom_nodes/ComfyUI-Easy-Use/**
-!custom_nodes/ComfyUI-Logic/
-!custom_nodes/ComfyUI-Logic/**
-!custom_nodes/ComfyUI-VideoHelperSuite/
-!custom_nodes/ComfyUI-VideoHelperSuite/**
+!custom_nodes/fx_comfyui_manager/
+!custom_nodes/fx_comfyui_manager/**
+!custom_nodes/fx_common_nodes/
+!custom_nodes/fx_common_nodes/**
 extra_model_paths.yaml
 /.vs
 .vscode/
