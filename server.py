@@ -41,19 +41,188 @@ class BinaryEventTypes:
     UNENCODED_PREVIEW_IMAGE = 2
     TEXT = 3
 
+ASTRALMIND_TOKEN = ""
+ASTRALMIND_USER_ID = ""
+ASTRALMIND_TOKEN_STATUS = None  # type: ignore[assignment]
+ASTRALMIND_TOKEN_LAST_CHECK = 0.0
+ASTRALMIND_TOKEN_CHECK_INTERVAL = 60.0  # seconds
+
+
 async def send_socket_catch_exception(function, message):
     try:
         await function(message)
     except (aiohttp.ClientError, aiohttp.ClientPayloadError, ConnectionResetError, BrokenPipeError, ConnectionError) as err:
         logging.warning("send error: {}".format(err))
 
+
 @web.middleware
 async def request_log_middleware(request: web.Request, handler):
+    """
+    统一记录请求日志，并从 Header / Query / Cookie / 进程内缓存中提取 AstralMind 登录态。
+    桌面场景是单用户进程，用一个全局变量缓存最近一次携带的 token，
+    后续请求即使不再带 token，中间件也仍然能拿到。
+    """
+
+    global ASTRALMIND_TOKEN, ASTRALMIND_USER_ID, ASTRALMIND_TOKEN_STATUS, ASTRALMIND_TOKEN_LAST_CHECK
+
+    # 0. 对启动器 / ComfyUI 内部通信直接放行，不做桌面/网页校验
+    #    这些请求来自 launcher(python-requests) 或 ComfyUI 自身，不是用户行为
+    _internal_prefixes = (
+        "/system_stats",
+        "/api/launcher/",
+        "/prompt",
+        "/queue",
+        "/interrupt",
+        "/history",
+        "/object_info",
+        "/extensions",
+    )
+    ua = request.headers.get("User-Agent", "") or ""
+    is_internal = (
+        request.path.startswith(_internal_prefixes)
+        or "python-requests" in ua
+        or "aiohttp" in ua
+    )
+    if is_internal:
+        return await handler(request)
+
+    # 1. 从 Header / Query / Cookie 抽取 token
+    auth_header = request.headers.get("Authorization") or ""
+    bearer_token = ""
+    if auth_header.lower().startswith("bearer "):
+        bearer_token = auth_header[7:].strip()
+
+    query_token = request.rel_url.query.get("token", "") or ""
+    cookie_token = request.cookies.get("astralmind_token", "") or ""
+
+    # 1.1 识别客户端来源：优先 query，其次自定义 Header，再次根据 User-Agent 判断是否为 Electron 桌面端
+    client_from_query = request.rel_url.query.get("client", "")
+    client_from_header = request.headers.get("X-Astralmind-Client", "")
+    client_type = (client_from_query or client_from_header or "").lower()
+    is_electron = "Electron" in ua
+
+    is_desktop = client_type == "desktop" or is_electron
+
+    # 1.2 如果不是桌面端，又不是调试模式，则拒绝网页端访问
+    allow_web_debug = os.getenv("WEB_DEBUG", "0").lower() in ("1", "true")
+    if not is_desktop and not allow_web_debug:
+        logging.info(
+            "[fx_agent] reject %s %s, client_type=%s ua=%s (web access disabled)",
+            request.method,
+            request.path,
+            client_type or "unknown",
+            ua,
+        )
+        return web.json_response(
+            {"code": 403, "message": "Web access disabled, please use desktop app"},
+            status=403,
+        )
+
+    # 2. 计算当前请求明确携带的 token（优先级：query > header > cookie）
+    current_token = query_token or bearer_token or cookie_token or ""
+    if current_token:
+        if current_token != ASTRALMIND_TOKEN:
+            logging.info("[fx_agent] astralmind_token updated")
+        ASTRALMIND_TOKEN = current_token
+
+    def _mask_token(token: str) -> str:
+        if not token:
+            return ""
+        if len(token) <= 8:
+            return "***"
+        return token[:4] + "..." + token[-4:]
+
+    cached_token = ASTRALMIND_TOKEN or ""
+
+    # 3. 每隔一定时间校验一次 token 是否仍然有效
+    async def _check_token(token: str) -> bool:
+        global ASTRALMIND_USER_ID
+        if not token:
+            return False
+        validate_url = "https://astralmindai.com/users/validateUser"
+        try:
+            params = {"token": token}
+            timeout = aiohttp.ClientTimeout(total=5)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(validate_url, params=params) as resp:
+                    # 这里按返回 200 视为有效，如需更细粒度可以根据接口的 code 字段再判断
+                    if resp.status == 200:
+                        try:
+                            data = await resp.json()
+                        except Exception:
+                            data = {}
+                        user_obj = None
+                        if isinstance(data, dict):
+                            user_obj = data.get("data") or data.get("user") or data
+                        user_id = None
+                        if isinstance(user_obj, dict):
+                            user_id = (
+                                user_obj.get("id")
+                                or user_obj.get("uid")
+                                or user_obj.get("userId")
+                            )
+                        if user_id is not None:
+                            ASTRALMIND_USER_ID = str(user_id)
+                            logging.info(
+                                "[fx_agent] validate token ok, user_id=%s",
+                                ASTRALMIND_USER_ID,
+                            )
+                        else:
+                            logging.info(
+                                "[fx_agent] validate token ok, but no user id in response"
+                            )
+                        return True
+                    logging.warning(
+                        "[fx_agent] validate token failed, status=%s", resp.status
+                    )
+                    return False
+        except Exception as e:
+            # 网络错误不直接判定 token 失效，避免用户临时断网就被登出
+            logging.warning("[fx_agent] validate token error: %s", e)
+            return ASTRALMIND_TOKEN_STATUS is True
+
+    import time as _time
+
+    now = _time.time()
+    if ASTRALMIND_TOKEN:
+        need_check = (
+            ASTRALMIND_TOKEN_STATUS is None
+            or now - ASTRALMIND_TOKEN_LAST_CHECK > ASTRALMIND_TOKEN_CHECK_INTERVAL
+        )
+        if need_check:
+            is_valid = await _check_token(ASTRALMIND_TOKEN)
+            ASTRALMIND_TOKEN_STATUS = is_valid
+            ASTRALMIND_TOKEN_LAST_CHECK = now
+
+    # 4. 如果 token 已判定为失效，对受保护接口直接返回 401（交由 Launcher / 桌面应用处理登出和跳转）
+    protected_prefixes = ("/api/gpt/", "/api/openrouter/", "/ws")
+    is_protected = request.path.startswith(protected_prefixes)
+    if is_protected and ASTRALMIND_TOKEN and ASTRALMIND_TOKEN_STATUS is False:
+        logging.info(
+            "[fx_agent] reject %s %s due to invalid AstralMind token, user_id=%s",
+            request.method,
+            request.path,
+            ASTRALMIND_USER_ID or "",
+        )
+        return web.json_response(
+            {
+                "code": 401,
+                "message": "AstralMind token invalid, please re-login",
+            },
+            status=401,
+        )
+
     logging.info(
-        "[fx_agent] incoming request %s %s - 当前余额充足",
+        "[fx_agent] incoming request %s %s auth=%s query_token=%s cookie_token=%s cached_token=%s user_id=%s",
         request.method,
         request.path,
+        _mask_token(bearer_token),
+        _mask_token(query_token),
+        _mask_token(cookie_token),
+        _mask_token(cached_token),
+        ASTRALMIND_USER_ID or "",
     )
+
     return await handler(request)
 
 
