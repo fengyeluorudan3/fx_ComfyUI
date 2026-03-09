@@ -7,7 +7,7 @@ __pycache__/
 /temp/
 /ui-optimize/
 /appold/
-# Ignore all under custom_nodes except these tracked subdirs
+# Ignore all under custom_nodes （只保留 example_node 示例）
 custom_nodes/*
 !custom_nodes/ComfyUI-Custom-Scripts
 !custom_nodes/ComfyUI-Custom-Scripts/
