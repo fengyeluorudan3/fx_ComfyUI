@@ -40,6 +40,14 @@ folder_names_and_paths["upscale_models"] = ([os.path.join(models_dir, "upscale_m
 
 folder_names_and_paths["custom_nodes"] = ([os.path.join(base_path, "custom_nodes")], set())
 
+# 允许通过环境变量 EXTRA_CUSTOM_NODES 追加额外的 custom_nodes 搜索目录
+# 多个目录用分号 ; 分隔，要求是绝对路径
+extra_custom_nodes = os.getenv("EXTRA_CUSTOM_NODES", "")
+if extra_custom_nodes:
+    extra_paths = [p.strip() for p in extra_custom_nodes.split(";") if p.strip()]
+    if extra_paths:
+        folder_names_and_paths["custom_nodes"][0].extend(extra_paths)
+
 folder_names_and_paths["hypernetworks"] = ([os.path.join(models_dir, "hypernetworks")], supported_pt_extensions)
 
 folder_names_and_paths["photomaker"] = ([os.path.join(models_dir, "photomaker")], supported_pt_extensions)
