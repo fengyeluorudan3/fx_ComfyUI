@@ -86,7 +86,8 @@ async def request_log_middleware(request: web.Request, handler):
     if is_internal:
         return await handler(request)
 
-    # 1. 从 Header / Query / Cookie 抽取 token
+    # 1. 从 Header / Query / Cookie 抽取 token（必须在任何 early return 之前执行，
+    #    否则 iframe 首次加载 /next?token=... 不会写入 ASTRALMIND_TOKEN，后续 /api/* 会员校验会报 token 未找到）
     auth_header = request.headers.get("Authorization") or ""
     bearer_token = ""
     if auth_header.lower().startswith("bearer "):
@@ -103,6 +104,22 @@ async def request_log_middleware(request: web.Request, handler):
 
     is_desktop = client_type == "desktop" or is_electron
 
+    # 2. 计算当前请求明确携带的 token（优先级：query > header > cookie）
+    current_token = query_token or bearer_token or cookie_token or ""
+    if current_token:
+        if current_token != ASTRALMIND_TOKEN:
+            logging.info("[fx_agent] astralmind_token updated")
+        ASTRALMIND_TOKEN = current_token
+
+    # 0.1 嵌入式前端（/next、/opencut 等）允许浏览器 GET 静态页面与资源。
+    # iframe 加载不会携带 Electron UA / desktop header，否则展开 opencut 会 403。
+    _frontend_ui_prefixes = ("/next", "/opencut", "/manager")
+    if request.method in ("GET", "HEAD", "OPTIONS") and any(
+        request.path == prefix or request.path.startswith(prefix + "/")
+        for prefix in _frontend_ui_prefixes
+    ):
+        return await handler(request)
+
     # 1.2 如果不是桌面端，又不是调试模式，则拒绝网页端访问
     allow_web_debug = os.getenv("WEB_DEBUG", "0").lower() in ("1", "true")
     if not is_desktop and not allow_web_debug:
@@ -118,13 +135,6 @@ async def request_log_middleware(request: web.Request, handler):
             status=403,
         )
 
-    # 2. 计算当前请求明确携带的 token（优先级：query > header > cookie）
-    current_token = query_token or bearer_token or cookie_token or ""
-    if current_token:
-        if current_token != ASTRALMIND_TOKEN:
-            logging.info("[fx_agent] astralmind_token updated")
-        ASTRALMIND_TOKEN = current_token
-
     def _mask_token(token: str) -> str:
         if not token:
             return ""
@@ -139,7 +149,12 @@ async def request_log_middleware(request: web.Request, handler):
         global ASTRALMIND_USER_ID
         if not token:
             return False
-        validate_url = "https://astralmindai.com/users/validateUser"
+        auth_base = (
+            os.environ.get("BRAND_AUTH_BASE_URL")
+            or os.environ.get("ASTRALMIND_AI_BASE_URL")
+            or "https://astralhubs.com"
+        ).rstrip("/")
+        validate_url = f"{auth_base}/users/validateUser"
         try:
             params = {"token": token}
             timeout = aiohttp.ClientTimeout(total=5)
@@ -294,6 +309,15 @@ def is_loopback(host):
     return loopback
 
 
+def _loopback_host_key(host: str | None) -> str | None:
+    if not host:
+        return None
+    normalized = host.lower()
+    if normalized in ("localhost", "127.0.0.1", "[::1]", "0.0.0.0"):
+        return "loopback"
+    return normalized
+
+
 def create_origin_only_middleware():
     @web.middleware
     async def origin_only_middleware(request: web.Request, handler):
@@ -317,7 +341,9 @@ def create_origin_only_middleware():
                 origin_domain = parsed.hostname
 
             if loopback and host_domain is not None and origin_domain is not None and len(host_domain) > 0 and len(origin_domain) > 0:
-                if host_domain != origin_domain:
+                host_key = _loopback_host_key(host_domain)
+                origin_key = _loopback_host_key(origin_domain)
+                if host_key != origin_key:
                     logging.warning("WARNING: request with non matching host and origin {} != {}, returning 403".format(host_domain, origin_domain))
                     return web.Response(status=403)
 
