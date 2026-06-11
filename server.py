@@ -210,7 +210,7 @@ async def request_log_middleware(request: web.Request, handler):
             ASTRALMIND_TOKEN_LAST_CHECK = now
 
     # 4. 如果 token 已判定为失效，对受保护接口直接返回 401（交由 Launcher / 桌面应用处理登出和跳转）
-    protected_prefixes = ("/api/gpt/", "/api/openrouter/", "/ws")
+    protected_prefixes = ("/api/gpt/", "/api/openrouter/")
     is_protected = request.path.startswith(protected_prefixes)
     if is_protected and ASTRALMIND_TOKEN and ASTRALMIND_TOKEN_STATUS is False:
         logging.info(
