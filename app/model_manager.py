@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 import base64
 import json
@@ -37,14 +35,18 @@ class ModelFileManager:
             for folder in model_types:
                 if folder in folder_black_list:
                     continue
-                output_folders.append({"name": folder, "folders": folder_paths.get_folder_paths(folder)})
+                output_folders.append({
+                    "name": folder,
+                    "folders": folder_paths.get_folder_paths(folder),
+                    "extensions": sorted(folder_paths.folder_names_and_paths[folder][1]),
+                })
             return web.json_response(output_folders)
 
         # NOTE: This is an experiment to replace `/models/{folder}`
         @routes.get("/experiment/models/{folder}")
         async def get_all_models(request):
             folder = request.match_info.get("folder", None)
-            if not folder in folder_paths.folder_names_and_paths:
+            if folder not in folder_paths.folder_names_and_paths:
                 return web.Response(status=404)
             files = self.get_model_file_list(folder)
             return web.json_response(files)
@@ -52,20 +54,44 @@ class ModelFileManager:
         @routes.get("/experiment/models/preview/{folder}/{path_index}/{filename:.*}")
         async def get_model_preview(request):
             folder_name = request.match_info.get("folder", None)
-            path_index = int(request.match_info.get("path_index", None))
             filename = request.match_info.get("filename", None)
 
-            if not folder_name in folder_paths.folder_names_and_paths:
+            if folder_name not in folder_paths.folder_names_and_paths:
                 return web.Response(status=404)
 
+            # The "{filename:.*}" capture also matches the empty string, which
+            # would resolve to the folder itself; reject it explicitly.
+            if not filename:
+                return web.Response(status=400)
+
+            try:
+                path_index = int(request.match_info.get("path_index", None))
+            except (TypeError, ValueError):
+                return web.Response(status=400)
+
             folders = folder_paths.folder_names_and_paths[folder_name]
+            if path_index < 0 or path_index >= len(folders[0]):
+                return web.Response(status=404)
             folder = folders[0][path_index]
-            full_filename = os.path.join(folder, filename)
+            full_filename = os.path.normpath(os.path.join(folder, filename))
+
+            # Prevent path traversal: the requested file must stay within the
+            # configured model folder. `filename` is an unrestricted ".*" capture,
+            # so values like "../../../../etc/passwd" would otherwise escape it.
+            if not folder_paths.is_within_directory(folder, full_filename):
+                return web.Response(status=403)
 
             previews = self.get_model_previews(full_filename)
             default_preview = previews[0] if len(previews) > 0 else None
             if default_preview is None or (isinstance(default_preview, str) and not os.path.isfile(default_preview)):
                 return web.Response(status=404)
+
+            # The preview is selected by a glob inside get_model_previews, so a
+            # companion file (e.g. "model.preview.png") could itself be a symlink
+            # resolving outside the model folder. Re-validate the file actually
+            # opened: is_within_directory realpaths it, catching symlink escape.
+            if isinstance(default_preview, str) and not folder_paths.is_within_directory(folder, default_preview):
+                return web.Response(status=403)
 
             try:
                 with Image.open(default_preview) as img:
@@ -130,10 +156,21 @@ class ModelFileManager:
 
             for file_name in filenames:
                 try:
-                    relative_path = os.path.relpath(os.path.join(dirpath, file_name), directory)
-                    result.append(relative_path)
-                except:
-                    logging.warning(f"Warning: Unable to access {file_name}. Skipping this file.")
+                    full_path = os.path.join(dirpath, file_name)
+                    relative_path = os.path.relpath(full_path, directory)
+
+                    # Get file metadata
+                    file_info = {
+                        "name": relative_path,
+                        "pathIndex": pathIndex,
+                        "modified": os.path.getmtime(full_path),  # Add modification time
+                        "created": os.path.getctime(full_path),   # Add creation time
+                        "size": os.path.getsize(full_path)        # Add file size
+                    }
+                    result.append(file_info)
+
+                except Exception as e:
+                    logging.warning(f"Warning: Unable to access {file_name}. Error: {e}. Skipping this file.")
                     continue
 
             for d in subdirs:
@@ -144,7 +181,7 @@ class ModelFileManager:
                     logging.warning(f"Warning: Unable to access {path}. Skipping this path.")
                     continue
 
-        return [{"name": f, "pathIndex": pathIndex} for f in result], dirs, time.perf_counter()
+        return result, dirs, time.perf_counter()
 
     def get_model_previews(self, filepath: str) -> list[str | BytesIO]:
         dirname = os.path.dirname(filepath)

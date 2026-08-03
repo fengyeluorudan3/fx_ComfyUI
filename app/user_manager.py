@@ -1,4 +1,3 @@
-from __future__ import annotations
 import json
 import os
 import re
@@ -6,6 +5,8 @@ import uuid
 import glob
 import shutil
 import logging
+import tempfile
+import mimetypes
 from aiohttp import web
 from urllib import parse
 from comfy.cli_args import args
@@ -20,13 +21,15 @@ class FileInfo(TypedDict):
     path: str
     size: int
     modified: int
+    created: int
 
 
 def get_file_info(path: str, relative_to: str) -> FileInfo:
     return {
         "path": os.path.relpath(path, relative_to).replace(os.sep, '/'),
         "size": os.path.getsize(path),
-        "modified": os.path.getmtime(path)
+        "modified": int(os.path.getmtime(path) * 1000),
+        "created": int(os.path.getctime(path) * 1000),
     }
 
 
@@ -57,6 +60,9 @@ class UserManager():
         user = "default"
         if args.multi_user and "comfy-user" in request.headers:
             user = request.headers["comfy-user"]
+            # Block System Users (use same error message to prevent probing)
+            if user.startswith(folder_paths.SYSTEM_USER_PREFIX):
+                raise KeyError("Unknown user: " + user)
 
         if user not in self.users:
             raise KeyError("Unknown user: " + user)
@@ -64,15 +70,16 @@ class UserManager():
         return user
 
     def get_request_user_filepath(self, request, file, type="userdata", create_dir=True):
-        user_directory = folder_paths.get_user_directory()
-
         if type == "userdata":
-            root_dir = user_directory
+            root_dir = folder_paths.get_user_directory()
         else:
             raise KeyError("Unknown filepath type:" + type)
 
         user = self.get_request_user_id(request)
-        path = user_root = os.path.abspath(os.path.join(root_dir, user))
+        user_root = folder_paths.get_public_user_directory(user)
+        if user_root is None:
+            return None
+        path = user_root
 
         # prevent leaving /{type}
         if os.path.commonpath((root_dir, user_root)) != root_dir:
@@ -99,7 +106,11 @@ class UserManager():
         name = name.strip()
         if not name:
             raise ValueError("username not provided")
+        if name.startswith(folder_paths.SYSTEM_USER_PREFIX):
+            raise ValueError("System User prefix not allowed")
         user_id = re.sub("[^a-zA-Z0-9-_]+", '-', name)
+        if user_id.startswith(folder_paths.SYSTEM_USER_PREFIX):
+            raise ValueError("System User prefix not allowed")
         user_id = user_id + "_" + str(uuid.uuid4())
 
         self.users[user_id] = name
@@ -130,7 +141,10 @@ class UserManager():
             if username in self.users.values():
                 return web.json_response({"error": "Duplicate username."}, status=400)
 
-            user_id = self.add_user(username)
+            try:
+                user_id = self.add_user(username)
+            except ValueError as e:
+                return web.json_response({"error": str(e)}, status=400)
             return web.json_response(user_id)
 
         @routes.get("/userdata")
@@ -323,7 +337,29 @@ class UserManager():
             if not isinstance(path, str):
                 return path
 
-            return web.FileResponse(path)
+            # User data files are arbitrary user-supplied content and are never
+            # meant to render inline. Disable MIME sniffing and force a download
+            # so uploaded markup/scripts can't execute in the app origin (stored
+            # XSS). Content-Disposition: attachment is the load-bearing guard;
+            # the content-type override and nosniff are defence in depth.
+            content_type = mimetypes.guess_type(path)[0] or 'application/octet-stream'
+
+            user_root = self.get_request_user_filepath(request, None, create_dir=False)
+            is_user_css = path == os.path.abspath(os.path.join(user_root, "user.css"))
+
+            if is_user_css:
+                content_type = "text/css"
+                disposition = "inline"
+            else:
+                if folder_paths.is_dangerous_content_type(content_type):
+                    content_type = 'application/octet-stream'
+                disposition = "attachment"
+
+            return web.FileResponse(path, headers={
+                "Content-Type": content_type,
+                "X-Content-Type-Options": "nosniff",
+                "Content-Disposition": disposition,
+            })
 
         @routes.post("/userdata/{file}")
         async def post_userdata(request):
@@ -361,10 +397,24 @@ class UserManager():
             if not overwrite and os.path.exists(path):
                 return web.Response(status=409, text="File already exists")
 
-            body = await request.read()
+            try:
+                body = await request.read()
 
-            with open(path, "wb") as f:
-                f.write(body)
+                dir_name = os.path.dirname(path)
+                fd, tmp_path = tempfile.mkstemp(dir=dir_name)
+                try:
+                    with os.fdopen(fd, "wb") as f:
+                        f.write(body)
+                    os.replace(tmp_path, path)
+                except:
+                    os.unlink(tmp_path)
+                    raise
+            except OSError as e:
+                logging.warning(f"Error saving file '{path}': {e}")
+                return web.Response(
+                    status=400,
+                    reason="Invalid filename. Please avoid special characters like :\\/*?\"<>|"
+                )
 
             user_path = self.get_request_user_filepath(request, None)
             if full_info:
@@ -415,7 +465,7 @@ class UserManager():
                 return source
 
             dest = get_user_data_path(request, check_exists=False, param="dest")
-            if not isinstance(source, str):
+            if not isinstance(dest, str):
                 return dest
 
             overwrite = request.query.get("overwrite", 'true') != "false"

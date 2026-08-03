@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 import os
 import time
 import mimetypes
@@ -19,7 +17,11 @@ if args.base_directory:
 else:
     base_path = os.path.dirname(os.path.realpath(__file__))
 
-models_dir = os.path.join(base_path, "models")
+if args.models_directory:
+    models_dir = os.path.abspath(args.models_directory)
+else:
+    models_dir = os.path.join(base_path, "models")
+
 folder_names_and_paths["checkpoints"] = ([os.path.join(models_dir, "checkpoints")], supported_pt_extensions)
 folder_names_and_paths["configs"] = ([os.path.join(models_dir, "configs")], [".yaml"])
 
@@ -38,6 +40,8 @@ folder_names_and_paths["gligen"] = ([os.path.join(models_dir, "gligen")], suppor
 
 folder_names_and_paths["upscale_models"] = ([os.path.join(models_dir, "upscale_models")], supported_pt_extensions)
 
+folder_names_and_paths["latent_upscale_models"] = ([os.path.join(models_dir, "latent_upscale_models")], supported_pt_extensions)
+
 folder_names_and_paths["custom_nodes"] = ([os.path.join(base_path, "custom_nodes")], set())
 
 # 允许通过环境变量 EXTRA_CUSTOM_NODES 追加额外的 custom_nodes 搜索目录
@@ -48,11 +52,27 @@ if extra_custom_nodes:
     if extra_paths:
         folder_names_and_paths["custom_nodes"][0].extend(extra_paths)
 
+folder_names_and_paths["datasets"] = ([os.path.join(base_path, "datasets")], set())
+
 folder_names_and_paths["hypernetworks"] = ([os.path.join(models_dir, "hypernetworks")], supported_pt_extensions)
 
 folder_names_and_paths["photomaker"] = ([os.path.join(models_dir, "photomaker")], supported_pt_extensions)
 
 folder_names_and_paths["classifiers"] = ([os.path.join(models_dir, "classifiers")], {""})
+
+folder_names_and_paths["model_patches"] = ([os.path.join(models_dir, "model_patches")], supported_pt_extensions)
+
+folder_names_and_paths["audio_encoders"] = ([os.path.join(models_dir, "audio_encoders")], supported_pt_extensions)
+
+folder_names_and_paths["background_removal"] = ([os.path.join(models_dir, "background_removal")], supported_pt_extensions)
+
+folder_names_and_paths["frame_interpolation"] = ([os.path.join(models_dir, "frame_interpolation")], supported_pt_extensions)
+
+folder_names_and_paths["geometry_estimation"] = ([os.path.join(models_dir, "geometry_estimation")], supported_pt_extensions)
+
+folder_names_and_paths["optical_flow"] = ([os.path.join(models_dir, "optical_flow")], supported_pt_extensions)
+
+folder_names_and_paths["detection"] = ([os.path.join(models_dir, "detection")], supported_pt_extensions)
 
 output_directory = os.path.join(base_path, "output")
 temp_directory = os.path.join(base_path, "temp")
@@ -148,6 +168,71 @@ def set_user_directory(user_dir: str) -> None:
     user_directory = user_dir
 
 
+# System User Protection - Protects system directories from HTTP endpoint access
+# System Users are internal-only users that cannot be accessed via HTTP endpoints.
+# They use the '__' prefix convention (similar to Python's private member convention).
+SYSTEM_USER_PREFIX = "__"
+
+
+def get_system_user_directory(name: str = "system") -> str:
+    """
+    Get the path to a System User directory.
+
+    System User directories (prefixed with '__') are only accessible via internal API,
+    not through HTTP endpoints. Use this for storing system-internal data that
+    should not be exposed to users.
+
+    Args:
+        name: System user name (e.g., "system", "cache"). Must be alphanumeric
+              with underscores allowed, but cannot start with underscore.
+
+    Returns:
+        Absolute path to the system user directory.
+
+    Raises:
+        ValueError: If name is empty, invalid, or starts with underscore.
+
+    Example:
+        >>> get_system_user_directory("cache")
+        '/path/to/user/__cache'
+    """
+    if not name or not isinstance(name, str):
+        raise ValueError("System user name cannot be empty")
+    if not name.replace("_", "").isalnum():
+        raise ValueError(f"Invalid system user name: '{name}'")
+    if name.startswith("_"):
+        raise ValueError("System user name should not start with underscore")
+    return os.path.join(get_user_directory(), f"{SYSTEM_USER_PREFIX}{name}")
+
+
+def get_public_user_directory(user_id: str) -> str | None:
+    """
+    Get the path to a Public User directory for HTTP endpoint access.
+
+    This function provides structural security by returning None for any
+    System User (prefixed with '__'). All HTTP endpoints should use this
+    function instead of directly constructing user paths.
+
+    Args:
+        user_id: User identifier from HTTP request.
+
+    Returns:
+        Absolute path to the user directory, or None if user_id is invalid
+        or refers to a System User.
+
+    Example:
+        >>> get_public_user_directory("default")
+        '/path/to/user/default'
+        >>> get_public_user_directory("__system")
+        None
+    """
+    if not user_id or not isinstance(user_id, str):
+        return None
+    if user_id.startswith(SYSTEM_USER_PREFIX):
+        return None
+    return os.path.join(get_user_directory(), user_id)
+
+
 #NOTE: used in http server so don't put folders that should not be accessed remotely
 def get_directory_by_type(type_name: str) -> str | None:
     if type_name == "output":
@@ -202,6 +287,76 @@ def annotated_filepath(name: str) -> tuple[str, str | None]:
     return name, base_dir
 
 
+# Content types a browser may execute or render inline. File endpoints that
+# serve user-controlled content must force these to download (and ideally set
+# Content-Disposition: attachment) to avoid stored XSS. Centralised here so the
+# /view and /userdata handlers can't drift apart. mimetypes.guess_type may
+# return either the text/* or application/* spelling depending on platform, so
+# both are listed.
+DANGEROUS_CONTENT_TYPES = {
+    'text/html', 'text/html-sandboxed', 'application/xhtml+xml',
+    'text/javascript', 'application/javascript', 'application/x-javascript',
+    'application/ecmascript', 'text/css',
+    'image/svg+xml', 'application/xml', 'text/xml',
+    # message/rfc822 (.mht/.mhtml) can carry script in some browsers.
+    'message/rfc822',
+}
+
+
+def is_dangerous_content_type(content_type: str | None) -> bool:
+    """Return True if a browser may execute or render `content_type` inline.
+
+    Normalises before matching so the check can't be slipped past with a
+    charset/boundary parameter (``text/html; charset=utf-8``) or casing
+    (``TEXT/HTML``). Any XML dialect (``*+xml`` or ``*/xml``) is treated as
+    dangerous because XML can carry inline script via stylesheet/entity tricks,
+    which also covers the ``application/{xslt,rss,atom,rdf}+xml`` family without
+    enumerating each one. Endpoints serving user-controlled content should route
+    a dangerous type to ``application/octet-stream`` + ``Content-Disposition:
+    attachment`` + ``X-Content-Type-Options: nosniff``.
+    """
+    if not content_type:
+        return False
+    normalized = content_type.split(';', 1)[0].strip().lower()
+    if normalized in DANGEROUS_CONTENT_TYPES:
+        return True
+    return normalized.endswith('+xml') or normalized.endswith('/xml')
+
+
+def renders_safely_as_image(content_type: str | None, sec_fetch_dest: str | None) -> bool:
+    """Return True if a dangerous `content_type` is safe to serve inline anyway.
+
+    An SVG referenced by an ``<img>`` is loaded in secure static mode: scripts
+    and external references are disabled, so the stored XSS that
+    ``is_dangerous_content_type`` guards against cannot fire. The attack needs
+    the SVG to become a document, which is a separate ``Sec-Fetch-Dest``.
+    Browsers set that header themselves and script cannot override it (the
+    ``Sec-`` prefix makes it a forbidden header name), so it is trustworthy for
+    this decision. Anything else, including a missing header from a non-browser
+    client or a proxy that strips it, fails closed.
+    """
+    if sec_fetch_dest != 'image':
+        return False
+    return (content_type or '').split(';', 1)[0].strip().lower() == 'image/svg+xml'
+
+
+def is_within_directory(directory: str, target: str) -> bool:
+    """Return True if `target` resolves to a path inside `directory`.
+
+    Uses realpath on both operands so that a symlink placed inside `directory`
+    that points elsewhere cannot escape the containment check at open time.
+    """
+    try:
+        directory = os.path.realpath(directory)
+        target = os.path.realpath(target)
+        return os.path.commonpath((directory, target)) == directory
+    except ValueError:
+        # ValueError is raised by realpath() on a path with an embedded null
+        # byte, and by commonpath() on Windows when the paths are on different
+        # drives. In either case the target is not safely within the directory.
+        return False
+
+
 def get_annotated_filepath(name: str, default_dir: str | None=None) -> str:
     name, base_dir = annotated_filepath(name)
 
@@ -211,7 +366,12 @@ def get_annotated_filepath(name: str, default_dir: str | None=None) -> str:
         else:
             base_dir = get_input_directory()  # fallback path
 
-    return os.path.join(base_dir, name)
+    filepath = os.path.abspath(os.path.join(base_dir, name))
+    # Prevent path traversal: the resolved path must stay within base_dir.
+    # repr() the name in the message so a crafted value can't inject log lines.
+    if not is_within_directory(base_dir, filepath):
+        raise ValueError("Invalid file path: {!r}".format(name))
+    return filepath
 
 
 def exists_annotated_filepath(name) -> bool:
@@ -220,7 +380,10 @@ def exists_annotated_filepath(name) -> bool:
     if base_dir is None:
         base_dir = get_input_directory()  # fallback path
 
-    filepath = os.path.join(base_dir, name)
+    filepath = os.path.abspath(os.path.join(base_dir, name))
+    # Treat traversal attempts as non-existent rather than probing the filesystem.
+    if not is_within_directory(base_dir, filepath):
+        return False
     return os.path.exists(filepath)
 
 
@@ -298,6 +461,9 @@ def filter_files_extensions(files: Collection[str], extensions: Collection[str])
 
 
 def get_full_path(folder_name: str, filename: str) -> str | None:
+    """
+    Get the full path of a file in a folder, has to be a file
+    """
     global folder_names_and_paths
     folder_name = map_legacy(folder_name)
     if folder_name not in folder_names_and_paths:
@@ -315,6 +481,9 @@ def get_full_path(folder_name: str, filename: str) -> str | None:
 
 
 def get_full_path_or_raise(folder_name: str, filename: str) -> str:
+    """
+    Get the full path of a file in a folder, has to be a file
+    """
     full_path = get_full_path(folder_name, filename)
     if full_path is None:
         raise FileNotFoundError(f"Model in folder '{folder_name}' with filename '{filename}' not found.")
@@ -375,7 +544,9 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
         prefix_len = len(os.path.basename(filename_prefix))
         prefix = filename[:prefix_len + 1]
         try:
-            digits = int(filename[prefix_len + 1:].split('_')[0])
+            remainder = filename[prefix_len + 1:]
+            base_remainder = remainder.split('.')[0]
+            digits = int(base_remainder.split('_')[0])
         except:
             digits = 0
         return digits, prefix
@@ -400,11 +571,10 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
 
     full_output_folder = os.path.join(output_dir, subfolder)
 
-    if os.path.commonpath((output_dir, os.path.abspath(full_output_folder))) != output_dir:
+    if not is_within_directory(output_dir, full_output_folder):
         err = "**** ERROR: Saving image outside the output folder is not allowed." + \
               "\n full_output_folder: " + os.path.abspath(full_output_folder) + \
-              "\n         output_dir: " + output_dir + \
-              "\n         commonpath: " + os.path.commonpath((output_dir, os.path.abspath(full_output_folder)))
+              "\n         output_dir: " + output_dir
         logging.error(err)
         raise Exception(err)
 
@@ -416,3 +586,26 @@ def get_save_image_path(filename_prefix: str, output_dir: str, image_width=0, im
         os.makedirs(full_output_folder, exist_ok=True)
         counter = 1
     return full_output_folder, filename, counter, subfolder, filename_prefix
+
+def get_input_subfolders() -> list[str]:
+    """Returns a list of all subfolder paths in the input directory, recursively.
+
+    Returns:
+        List of folder paths relative to the input directory, excluding the root directory
+    """
+    input_dir = get_input_directory()
+    folders = []
+
+    try:
+        if not os.path.exists(input_dir):
+            return []
+
+        for root, dirs, _ in os.walk(input_dir):
+            rel_path = os.path.relpath(root, input_dir)
+            if rel_path != ".":  # Only include non-root directories
+                # Normalize path separators to forward slashes
+                folders.append(rel_path.replace(os.sep, '/'))
+
+        return sorted(folders)
+    except FileNotFoundError:
+        return []

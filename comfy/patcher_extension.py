@@ -1,8 +1,9 @@
-from __future__ import annotations
 from typing import Callable
 
 class CallbacksMP:
     ON_CLONE = "on_clone"
+    ON_DEEPCLONE_MULTIGPU = "on_deepclone_multigpu"
+    ON_MATCH_MULTIGPU_CLONES = "on_match_multigpu_clones"
     ON_LOAD = "on_load_after"
     ON_DETACH = "on_detach_after"
     ON_CLEANUP = "on_cleanup"
@@ -50,6 +51,7 @@ class WrappersMP:
     OUTER_SAMPLE = "outer_sample"
     PREPARE_SAMPLING = "prepare_sampling"
     SAMPLER_SAMPLE = "sampler_sample"
+    PREDICT_NOISE = "predict_noise"
     CALC_COND_BATCH = "calc_cond_batch"
     APPLY_MODEL = "apply_model"
     DIFFUSION_MODEL = "diffusion_model"
@@ -149,7 +151,7 @@ def merge_nested_dicts(dict1: dict, dict2: dict, copy_dict1=True):
     for key, value in dict2.items():
         if isinstance(value, dict):
             curr_value = merged_dict.setdefault(key, {})
-            merged_dict[key] = merge_nested_dicts(value, curr_value)
+            merged_dict[key] = merge_nested_dicts(curr_value, value)
         elif isinstance(value, list):
             merged_dict.setdefault(key, []).extend(value)
         else:

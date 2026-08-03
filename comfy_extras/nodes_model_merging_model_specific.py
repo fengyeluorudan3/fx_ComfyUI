@@ -1,7 +1,7 @@
 import comfy_extras.nodes_model_merging
 
 class ModelMergeSD1(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
     @classmethod
     def INPUT_TYPES(s):
         arg_dict = { "model1": ("MODEL",),
@@ -27,7 +27,7 @@ class ModelMergeSD1(comfy_extras.nodes_model_merging.ModelMergeBlocks):
 
 
 class ModelMergeSDXL(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -53,7 +53,7 @@ class ModelMergeSDXL(comfy_extras.nodes_model_merging.ModelMergeBlocks):
         return {"required": arg_dict}
 
 class ModelMergeSD3_2B(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -77,7 +77,7 @@ class ModelMergeSD3_2B(comfy_extras.nodes_model_merging.ModelMergeBlocks):
 
 
 class ModelMergeAuraflow(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -104,7 +104,7 @@ class ModelMergeAuraflow(comfy_extras.nodes_model_merging.ModelMergeBlocks):
         return {"required": arg_dict}
 
 class ModelMergeFlux1(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -130,7 +130,7 @@ class ModelMergeFlux1(comfy_extras.nodes_model_merging.ModelMergeBlocks):
         return {"required": arg_dict}
 
 class ModelMergeSD35_Large(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -153,7 +153,7 @@ class ModelMergeSD35_Large(comfy_extras.nodes_model_merging.ModelMergeBlocks):
         return {"required": arg_dict}
 
 class ModelMergeMochiPreview(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -175,7 +175,7 @@ class ModelMergeMochiPreview(comfy_extras.nodes_model_merging.ModelMergeBlocks):
         return {"required": arg_dict}
 
 class ModelMergeLTXV(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -197,7 +197,7 @@ class ModelMergeLTXV(comfy_extras.nodes_model_merging.ModelMergeBlocks):
         return {"required": arg_dict}
 
 class ModelMergeCosmos7B(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -221,7 +221,7 @@ class ModelMergeCosmos7B(comfy_extras.nodes_model_merging.ModelMergeBlocks):
         return {"required": arg_dict}
 
 class ModelMergeCosmos14B(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
 
     @classmethod
     def INPUT_TYPES(s):
@@ -245,7 +245,7 @@ class ModelMergeCosmos14B(comfy_extras.nodes_model_merging.ModelMergeBlocks):
         return {"required": arg_dict}
 
 class ModelMergeWAN2_1(comfy_extras.nodes_model_merging.ModelMergeBlocks):
-    CATEGORY = "advanced/model_merging/model_specific"
+    CATEGORY = "model/merging/model specific"
     DESCRIPTION = "1.3B model has 30 blocks, 14B model has 40 blocks. Image to video model has the extra img_emb."
 
     @classmethod
@@ -268,6 +268,105 @@ class ModelMergeWAN2_1(comfy_extras.nodes_model_merging.ModelMergeBlocks):
 
         return {"required": arg_dict}
 
+class ModelMergeCosmosPredict2_2B(comfy_extras.nodes_model_merging.ModelMergeBlocks):
+    CATEGORY = "model/merging/model specific"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = { "model1": ("MODEL",),
+                              "model2": ("MODEL",)}
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        arg_dict["pos_embedder."] = argument
+        arg_dict["x_embedder."] = argument
+        arg_dict["t_embedder."] = argument
+        arg_dict["t_embedding_norm."] = argument
+
+
+        for i in range(28):
+            arg_dict["blocks.{}.".format(i)] = argument
+
+        arg_dict["final_layer."] = argument
+
+        return {"required": arg_dict}
+
+class ModelMergeCosmosPredict2_14B(comfy_extras.nodes_model_merging.ModelMergeBlocks):
+    CATEGORY = "model/merging/model specific"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = { "model1": ("MODEL",),
+                              "model2": ("MODEL",)}
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        arg_dict["pos_embedder."] = argument
+        arg_dict["x_embedder."] = argument
+        arg_dict["t_embedder."] = argument
+        arg_dict["t_embedding_norm."] = argument
+
+
+        for i in range(36):
+            arg_dict["blocks.{}.".format(i)] = argument
+
+        arg_dict["final_layer."] = argument
+
+        return {"required": arg_dict}
+
+class ModelMergeQwenImage(comfy_extras.nodes_model_merging.ModelMergeBlocks):
+    CATEGORY = "model/merging/model specific"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = { "model1": ("MODEL",),
+                              "model2": ("MODEL",)}
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        arg_dict["pos_embeds."] = argument
+        arg_dict["img_in."] = argument
+        arg_dict["txt_norm."] = argument
+        arg_dict["txt_in."] = argument
+        arg_dict["time_text_embed."] = argument
+
+        for i in range(60):
+            arg_dict["transformer_blocks.{}.".format(i)] = argument
+
+        arg_dict["proj_out."] = argument
+
+        return {"required": arg_dict}
+
+class ModelMergeKrea2(comfy_extras.nodes_model_merging.ModelMergeBlocks):
+    CATEGORY = "model/merging/model specific"
+
+    @classmethod
+    def INPUT_TYPES(s):
+        arg_dict = { "model1": ("MODEL",),
+                              "model2": ("MODEL",)}
+
+        argument = ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01})
+
+        arg_dict["first."] = argument
+        arg_dict["tmlp."] = argument
+        arg_dict["txtmlp."] = argument
+        arg_dict["tproj."] = argument
+
+        for i in range(2):
+            arg_dict["txtfusion.layerwise_blocks.{}.".format(i)] = argument
+
+        arg_dict["txtfusion.projector."] = argument
+
+        for i in range(2):
+            arg_dict["txtfusion.refiner_blocks.{}.".format(i)] = argument
+
+        for i in range(28):
+            arg_dict["blocks.{}.".format(i)] = argument
+
+        arg_dict["last."] = argument
+
+        return {"required": arg_dict}
+
 NODE_CLASS_MAPPINGS = {
     "ModelMergeSD1": ModelMergeSD1,
     "ModelMergeSD2": ModelMergeSD1, #SD1 and SD2 have the same blocks
@@ -281,4 +380,8 @@ NODE_CLASS_MAPPINGS = {
     "ModelMergeCosmos7B": ModelMergeCosmos7B,
     "ModelMergeCosmos14B": ModelMergeCosmos14B,
     "ModelMergeWAN2_1": ModelMergeWAN2_1,
+    "ModelMergeCosmosPredict2_2B": ModelMergeCosmosPredict2_2B,
+    "ModelMergeCosmosPredict2_14B": ModelMergeCosmosPredict2_14B,
+    "ModelMergeQwenImage": ModelMergeQwenImage,
+    "ModelMergeKrea2": ModelMergeKrea2,
 }

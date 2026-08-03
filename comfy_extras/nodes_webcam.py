@@ -5,6 +5,7 @@ MAX_RESOLUTION = nodes.MAX_RESOLUTION
 
 
 class WebcamCapture(nodes.LoadImage):
+    SEARCH_ALIASES = ["camera input", "live capture", "camera feed", "snapshot"]
     @classmethod
     def INPUT_TYPES(s):
         return {
@@ -22,6 +23,10 @@ class WebcamCapture(nodes.LoadImage):
 
     def load_capture(self, image, **kwargs):
         return super().load_image(folder_paths.get_annotated_filepath(image))
+
+    @classmethod
+    def IS_CHANGED(cls, image, width, height, capture_on_queue):
+        return super().IS_CHANGED(image)
 
 
 NODE_CLASS_MAPPINGS = {
