@@ -90,8 +90,8 @@ ASTRALMIND_API_BASE_URL = (
 # Oydn 网关（fx_gateway）对外 base URL，fxllm 插件的 oydn provider 统一引用
 ASTRALMIND_OYDN_BASE_URL = (
     os.environ.get("ASTRALMIND_OYDN_BASE_URL")
-    # or "https://api-oydn.astralmindai.com"
-    or "https://api-oydn-preview.aisphereoa.com"
+    or "https://api-oydn.astralmindai.com"
+    # or "https://api-oydn-preview.aisphereoa.com"
 ).rstrip("/")
 
 async def send_socket_catch_exception(function, message):
@@ -267,18 +267,35 @@ async def request_log_middleware(request: web.Request, handler):
             status=401,
         )
 
-    # ComfyUI previews may request the same asset repeatedly while a canvas
-    # rerenders. Keep auth diagnostics for API calls, but do not flood INFO
-    # logs with normal, unauthenticated preview-resource reads.
-    if request.path not in {"/api/view", "/view"}:
+    # ComfyUI previews / 组件市场轮询会高频打 API，勿在 INFO 刷 token 诊断。
+    # 仅对「可能有问题」的写操作或敏感路径打 DEBUG/短路噪音。
+    _quiet_prefixes = (
+        "/api/view",
+        "/view",
+        "/api/component-manager/",
+        "/api/object_info",
+        "/api/queue",
+        "/api/history",
+        "/api/system_stats",
+        "/ws",
+        "/internal/",
+    )
+    _noisy = any(
+        request.path == p or request.path.startswith(p)
+        for p in _quiet_prefixes
+    )
+    if not _noisy and request.method not in ("GET", "HEAD", "OPTIONS"):
         logging.info(
-            "[fx_agent] incoming request %s %s auth=%s query_token=%s cookie_token=%s cached_token=%s user_id=%s",
+            "[fx_agent] %s %s user_id=%s",
             request.method,
             request.path,
-            _mask_token(bearer_token),
-            _mask_token(query_token),
-            _mask_token(cookie_token),
-            _mask_token(cached_token),
+            ASTRALMIND_USER_ID or "",
+        )
+    elif not _noisy:
+        logging.debug(
+            "[fx_agent] %s %s user_id=%s",
+            request.method,
+            request.path,
             ASTRALMIND_USER_ID or "",
         )
 
