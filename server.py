@@ -400,34 +400,47 @@ def _loopback_host_key(host: str | None) -> str | None:
 def create_origin_only_middleware():
     @web.middleware
     async def origin_only_middleware(request: web.Request, handler):
-        if 'Sec-Fetch-Site' in request.headers:
-            sec_fetch_site = request.headers['Sec-Fetch-Site']
-            if sec_fetch_site == 'cross-site':
+        # Desktop shell (Vite/Electron on localhost:3000) loads the engine iframe
+        # from 127.0.0.1:8188. Browsers mark that fetch as Sec-Fetch-Site: cross-site
+        # even though both are loopback. Blanket-blocking cross-site breaks that
+        # readiness probe (HEAD /next → 403 → app black screen).
+        #
+        # Keep CSRF protection:
+        # - non-loopback Host still rejects any cross-site request
+        # - loopback Host only allows safe methods from cross-site (GET/HEAD/OPTIONS);
+        #   POST/PUT/DELETE still require Host/Origin match below.
+        host_header = request.headers.get("Host", "") or ""
+        host_parsed = urllib.parse.urlsplit("//" + host_header.lower())
+        host_is_loopback = is_loopback(host_parsed.hostname)
+
+        if request.headers.get("Sec-Fetch-Site") == "cross-site":
+            if not host_is_loopback or request.method not in ("GET", "HEAD", "OPTIONS"):
                 return web.Response(status=403)
+
         #this code is used to prevent the case where a random website can queue comfy workflows by making a POST to 127.0.0.1 which browsers don't prevent for some dumb reason.
         #in that case the Host and Origin hostnames won't match
         #I know the proper fix would be to add a cookie but this should take care of the problem in the meantime
         if 'Host' in request.headers and 'Origin' in request.headers:
             host = request.headers['Host']
             origin = request.headers['Origin']
-            host_domain = host.lower()
             parsed = urllib.parse.urlparse(origin)
-            origin_domain = parsed.netloc.lower()
-            host_domain_parsed = urllib.parse.urlsplit('//' + host_domain)
+            host_domain_parsed = urllib.parse.urlsplit('//' + host.lower())
 
-            #limit the check to when the host domain is localhost, this makes it slightly less safe but should still prevent the exploit
-            loopback = is_loopback(host_domain_parsed.hostname)
+            # Compare hostnames (ports ignored). localhost / 127.0.0.1 / ::1 unify
+            # to "loopback" so desktop shell on :3000 can reach engine on :8188.
+            host_hostname = host_domain_parsed.hostname
+            origin_hostname = parsed.hostname
+            loopback = is_loopback(host_hostname)
 
-            if parsed.port is None: #if origin doesn't have a port strip it from the host to handle weird browsers, same for host
-                host_domain = host_domain_parsed.hostname
-            if host_domain_parsed.port is None:
-                origin_domain = parsed.hostname
-
-            if loopback and host_domain is not None and origin_domain is not None and len(host_domain) > 0 and len(origin_domain) > 0:
-                host_key = _loopback_host_key(host_domain)
-                origin_key = _loopback_host_key(origin_domain)
+            if loopback and host_hostname and origin_hostname:
+                host_key = _loopback_host_key(host_hostname)
+                origin_key = _loopback_host_key(origin_hostname)
                 if host_key != origin_key:
-                    logging.warning("WARNING: request with non matching host and origin {} != {}, returning 403".format(host_domain, origin_domain))
+                    logging.warning(
+                        "WARNING: request with non matching host and origin %s != %s, returning 403",
+                        host_hostname,
+                        origin_hostname,
+                    )
                     return web.Response(status=403)
 
         if request.method == "OPTIONS":
