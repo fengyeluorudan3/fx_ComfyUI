@@ -90,7 +90,7 @@ ASTRALMIND_API_BASE_URL = (
 # Oydn 网关（fx_gateway）对外 base URL，fxllm 插件的 oydn provider 统一引用
 ASTRALMIND_OYDN_BASE_URL = (
     os.environ.get("ASTRALMIND_OYDN_BASE_URL")
-    or "https://api-oydn.astralmindai.com"
+    or "https://api-gate.astralmindai.com"
     # or "https://api-oydn-preview.aisphereoa.com"
 ).rstrip("/")
 
