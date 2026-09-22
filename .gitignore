@@ -14,6 +14,12 @@ custom_nodes/*
 !custom_nodes/ComfyUI-Custom-Scripts/**
 !custom_nodes/ComfyUI-Easy-Use/
 !custom_nodes/ComfyUI-Easy-Use/**
+!custom_nodes/fx_crawler/
+!custom_nodes/fx_crawler/**
+!custom_nodes/fx_publish/
+!custom_nodes/fx_publish/**
+# 原独立仓库的 git 目录改名保留，不入库
+.git.local/
 extra_model_paths.yaml
 /.vs
 .vscode/

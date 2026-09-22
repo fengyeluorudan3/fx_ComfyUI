@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# 运行时产物（cookie 登录态、调试截图/日志），绝不入库
+cookies/
+logs/
+*.log
+
+# 系统
+.DS_Store
