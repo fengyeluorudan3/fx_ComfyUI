@@ -246,6 +246,13 @@ def normalize_url(raw: str) -> str:
     text = str(raw or "").strip()
     if not text:
         return ""
+    # 裸 BV/av 号必须先于视频号判断，否则会被当成裸 sph id 拼成视频号链接
+    m = re.fullmatch(r"(BV[0-9A-Za-z]{10})", text)
+    if m:
+        return f"https://www.bilibili.com/video/{m.group(1)}"
+    m = re.fullmatch(r"[Aa][Vv](\d+)", text)
+    if m:
+        return f"https://www.bilibili.com/video/av{m.group(1)}"
     # 视频号优先（含 finder-preview / weixin.qq.com/sph / 裸 sph id）
     try:
         from weixin_channels import is_weixin_channels_url, normalize_channels_url
@@ -257,13 +264,6 @@ def normalize_url(raw: str) -> str:
     m = re.search(r'https?://[^\s一-鿿，,、"\'）)】\]]+', text)
     if m:
         return m.group(0).rstrip(".,;")
-    # 裸 ID
-    m = re.fullmatch(r"(BV[0-9A-Za-z]{10})", text)
-    if m:
-        return f"https://www.bilibili.com/video/{m.group(1)}"
-    m = re.fullmatch(r"[Aa][Vv](\d+)", text)
-    if m:
-        return f"https://www.bilibili.com/video/av{m.group(1)}"
     # 抖音 aweme_id：19 位纯数字（B站 av 号没这么长，不会撞）
     if re.fullmatch(r"\d{17,20}", text):
         return f"https://www.douyin.com/video/{text}"
