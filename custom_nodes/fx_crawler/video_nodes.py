@@ -758,18 +758,46 @@ def _base_opts(cookiefile, cookiesfrombrowser, proxy):
     return opts
 
 
+_DY_DEP_HINT = (
+    "抖音直连模块不可用：{err}\n"
+    "抖音不能走 yt-dlp（会报 Fresh cookies needed），请在 ComfyUI 运行环境执行：\n"
+    "  pip install -r custom_nodes/fx_crawler/requirements.txt\n"
+    "然后重启 ComfyUI。"
+)
+
+
+def _douyin_direct_module(url: str):
+    """抖音链接 → douyin_direct 模块；非抖音链接 → None。
+
+    以前这里用 `except ImportError: pass` 静默回退 yt-dlp，结果缺依赖时用户只能看到
+    yt-dlp 的「Fresh cookies needed」，完全看不出真实原因。现在缺依赖直接报清楚。
+    """
+    text = str(url or "").strip()
+    low = text.lower()
+    looks_douyin = (
+        "douyin.com" in low or "iesdouyin.com" in low or re.fullmatch(r"\d{17,20}", text) is not None
+    )
+    try:
+        import douyin_direct
+    except ImportError as e:
+        if looks_douyin:
+            raise RuntimeError(_DY_DEP_HINT.format(err=e)) from e
+        return None
+    return douyin_direct if douyin_direct.is_douyin_video_url(url) else None
+
+
 def probe(url: str, cookiefile=None, cookiesfrombrowser=None, proxy="",
           cookie_text: str = "") -> dict:
     """只解析不下载。"""
     url = normalize_url(url)
-    try:
-        from douyin_direct import is_douyin_video_url, probe_douyin
-        if is_douyin_video_url(url):
-            return probe_douyin(
+    dy = _douyin_direct_module(url)
+    if dy is not None:
+        try:
+            return dy.probe_douyin(
                 url, cookiefile=cookiefile, cookiesfrombrowser=cookiesfrombrowser, proxy=proxy,
             )
-    except ImportError:
-        pass
+        except ImportError as e:
+            raise RuntimeError(_DY_DEP_HINT.format(err=e)) from e
     try:
         from weixin_channels import is_weixin_channels_url, probe_channels
         if is_weixin_channels_url(url):
@@ -840,23 +868,23 @@ def download(url: str, quality: str = "1080p", out_dir: str = "", reuse: bool = 
                 pass
 
     # ---- 抖音：HTTP API 直链，不走 yt-dlp（yt-dlp 常报 Fresh cookies needed）----
-    try:
-        from douyin_direct import is_douyin_video_url, download_douyin
-        if is_douyin_video_url(url):
-            out_mp4 = os.path.join(work, key + ".mp4")
-            path, slim = download_douyin(
+    dy = _douyin_direct_module(url)
+    if dy is not None:
+        out_mp4 = os.path.join(work, key + ".mp4")
+        try:
+            path, slim = dy.download_douyin(
                 url, out_mp4,
                 cookiefile=cookiefile, cookiesfrombrowser=cookiesfrombrowser,
                 proxy=proxy, pbar=pbar,
             )
-            try:
-                with open(os.path.join(work, key + ".json"), "w", encoding="utf-8") as f:
-                    json.dump(slim, f, ensure_ascii=False, indent=2)
-            except Exception:
-                pass
-            return path, slim
-    except ImportError:
-        pass
+        except ImportError as e:
+            raise RuntimeError(_DY_DEP_HINT.format(err=e)) from e
+        try:
+            with open(os.path.join(work, key + ".json"), "w", encoding="utf-8") as f:
+                json.dump(slim, f, ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        return path, slim
 
     # ---- 微信视频号：不走 yt-dlp ----
     try:
@@ -946,16 +974,16 @@ def download_images(url: str, out_dir: str = "", reuse: bool = True,
     if not url:
         raise RuntimeError("链接是空的。")
     work = _cache_dir(out_dir)
-    try:
-        from douyin_direct import is_douyin_video_url, download_douyin_images
-        if is_douyin_video_url(url):
-            return download_douyin_images(
+    dy = _douyin_direct_module(url)
+    if dy is not None:
+        try:
+            return dy.download_douyin_images(
                 url, work, reuse=reuse,
                 cookiefile=cookiefile, cookiesfrombrowser=cookiesfrombrowser,
                 proxy=proxy, pbar=pbar,
             )
-    except ImportError:
-        pass
+        except ImportError as e:
+            raise RuntimeError(_DY_DEP_HINT.format(err=e)) from e
     raise RuntimeError("图文下载目前仅完整支持抖音作品链接。")
 
 

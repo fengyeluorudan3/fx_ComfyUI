@@ -495,6 +495,28 @@ class MiniMaxH3Model(nn.Module):
             rows.append(r.to(device))
         return torch.cat(rows, dim=0) if rows else None
 
+    def _run_blocks(self, h, t_emb, mod_segments, rope_freqs, transformer_options, start=0, end=None):
+        patches_replace = transformer_options.get("patches_replace", {})
+        blocks_replace = patches_replace.get("dit", {})
+        end = len(self.blocks) if end is None else end
+        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks[start:end]), h.device, transformer_options)
+        for i in range(start, end):
+            block = self.blocks[i]
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, h.device, block)
+            if ("double_block", i) in blocks_replace:
+                def block_wrap(args):
+                    return {"img": block(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
+                                         transformer_options=args["transformer_options"])}
+                h = blocks_replace[("double_block", i)](
+                    {"img": h, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
+                     "transformer_options": transformer_options},
+                    {"original_block": block_wrap})["img"]
+            else:
+                h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
+        if prefetch_queue is not None:
+            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, h.device, None)
+        return h
+
     def forward(self, x, timestep, context, transformer_options={}, minimax_payload=None, **kwargs):
         return comfy.patcher_extension.WrapperExecutor.new_class_executor(
             self._forward,
@@ -612,23 +634,20 @@ class MiniMaxH3Model(nn.Module):
         rope_freqs = rope_rotation_table(self.rope_freqs(layout.position_ids, device), dtype)
 
         # blocks
+        # blocks (TE-Speed-MiniMaxH3-OSS hook)
         patches_replace = transformer_options.get("patches_replace", {})
         blocks_replace = patches_replace.get("dit", {})
-        prefetch_queue = comfy.model_prefetch.make_prefetch_queue(list(self.blocks), device, transformer_options)
-        for i, block in enumerate(self.blocks):
-            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, block)
-            if ("double_block", i) in blocks_replace:
-                def block_wrap(args):
-                    return {"img": block(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
-                                         transformer_options=args["transformer_options"])}
-                h = blocks_replace[("double_block", i)](
-                    {"img": h, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
-                     "transformer_options": transformer_options},
-                    {"original_block": block_wrap})["img"]
-            else:
-                h = block(h, t_emb, mod_segments, rope_freqs, transformer_options=transformer_options)
-        if prefetch_queue is not None:
-            comfy.model_prefetch.prefetch_queue_pop(prefetch_queue, device, None)
+        cache_ranges = [(a, b) for a, b, kind in layout.segments if kind in ("audio", "video")]
+        if ("block_loop", 0) in blocks_replace:
+            def block_loop_wrap(args):
+                return {"img": self._run_blocks(args["img"], args["t_emb"], args["mod_segments"], args["rope_freqs"],
+                                                args["transformer_options"], args.get("start", 0), args.get("end"))}
+            h = blocks_replace[("block_loop", 0)](
+                {"img": h, "t_emb": t_emb, "mod_segments": mod_segments, "rope_freqs": rope_freqs,
+                 "transformer_options": transformer_options, "cache_ranges": cache_ranges, "block_count": len(self.blocks)},
+                {"original_block": block_loop_wrap})["img"]
+        else:
+            h = self._run_blocks(h, t_emb, mod_segments, rope_freqs, transformer_options)
 
         # target streams are single contiguous segments (audio then video, last two)
         video_seg = next((a, b, t_row[seg_t["video"]]) for a, b, k in layout.segments if k == "video")

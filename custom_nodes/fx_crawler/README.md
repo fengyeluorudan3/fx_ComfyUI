@@ -58,7 +58,11 @@ Get Video Components。
 - **直接吃分享文案**：抖音、小红书复制出来那一大段带表情和文字的内容可以整段粘贴，
   节点自己抽 URL；也支持裸 `BV号` / `av号`。
 - **缓存**：按 `链接+画质` 落到 `input/fx_video/`，同参数重跑工作流秒出，不重复下载。
-- **cookie**：小红书/抖音部分内容、B站 1080P+ 需要登录态。四种来源 ——
+- **抖音单条作品不需要 cookie**：2026-09-14 起 www.douyin.com 的 detail 接口挂在 Argus
+  网关后面，脚本带 cookie + a_bogus 反而被拦（403 Uifid/Signature Not Found）。`douyin_direct`
+  现按顺序走：open.douyin.com 免签名请求（画质列表完整）→ 移动端 feed 接口（单一画质）→
+  旧版签名路由（仅兜底，需 cookie）。抖音**用户页**列表仍需 cookie。
+- **cookie**：小红书部分内容、B站 1080P+、抖音用户页需要登录态。四种来源 ——
   `cookie文本`（DevTools 里 copy 的 `k=v; k=v`，节点转成 Netscape 格式）、
   `cookies.txt文件`、`本机Chrome`、`fx_crawler浏览器`（复用采集节点登录过的
   `browser_data/` 那个 Chrome 用户目录，macOS 首次可能弹钥匙串授权）。

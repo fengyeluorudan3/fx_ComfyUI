@@ -81,20 +81,132 @@ def _douyin_common_params(cookie_dict: Dict[str, str]) -> Dict[str, str]:
     }
 
 
+_DETAIL_URI = "/aweme/v1/web/aweme/detail/"
+_MOBILE_UA = (
+    "com.ss.android.ugc.aweme/290100 (Linux; U; Android 12; zh_CN; Pixel 6; "
+    "Build/SP1A.210812.016; Cronet/TTNetVersion:3ed4f6a5 2022-06-30 QuicVersion:0144d358 2022-03-29)"
+)
+_MOBILE_FEED_HOSTS = ("https://aweme.snssdk.com", "https://api5-normal-c-hl.amemv.com")
+
+
+class _DetailRouteFailed(RuntimeError):
+    """单条路由失败（换下一条），最终都失败才对用户抛。"""
+
+
+def _parse_detail_response(resp, route: str) -> dict:
+    if resp.status_code != 200:
+        raise _DetailRouteFailed(
+            f"{route}: HTTP {resp.status_code} {resp.text[:80].replace(chr(10), ' ')}"
+        )
+    try:
+        data = resp.json()
+    except Exception as e:
+        raise _DetailRouteFailed(f"{route}: 非 JSON 响应 {resp.text[:80]!r}") from e
+    if not isinstance(data, dict) or data.get("status_code") not in (0, None):
+        raise _DetailRouteFailed(f"{route}: status {data.get('status_msg') or data.get('status_code')}")
+    detail = data.get("aweme_detail")
+    if not detail and isinstance(data.get("aweme_list"), list) and data["aweme_list"]:
+        detail = data["aweme_list"][0]
+    if not detail or not isinstance(detail, dict):
+        raise _DetailRouteFailed(f"{route}: aweme_detail 为空")
+    return detail
+
+
+def _fetch_detail_open_route(aweme_id: str, cookie_dict: Dict[str, str], proxy: str) -> dict:
+    """路由 1：open.douyin.com 来源的免签名请求。
+
+    2026-09-14 起 www.douyin.com 的 detail 接口挂在 Argus 网关后面，脚本请求带 cookie +
+    a_bogus 也会被拦（"Blocked by ArgusSecurityPlugin Uifid Not Found / Signature Not Found"）。
+    以 open.douyin.com 为 Origin、只带 aweme_id + aid 的裸请求不经这套校验，且返回的
+    bit_rate 列表完整（含 1080p）。不需要 cookie；有 UIFID 时顺带以 header 送上。
+    """
+    headers = {
+        "User-Agent": _UA,
+        "Origin": "https://open.douyin.com",
+        "Referer": "https://open.douyin.com/",
+        "Accept": "application/json, text/plain, */*",
+    }
+    uifid = (cookie_dict or {}).get("UIFID") or (cookie_dict or {}).get("UIFID_TEMP")
+    if uifid:
+        headers["uifid"] = uifid
+    with httpx.Client(proxy=proxy or None, timeout=30.0, follow_redirects=True) as client:
+        resp = client.get(
+            f"https://www.douyin.com{_DETAIL_URI}",
+            params={"aweme_id": aweme_id, "aid": "6383"},
+            headers=headers,
+        )
+    return _parse_detail_response(resp, "open.douyin 免签名")
+
+
+def _fetch_detail_mobile_route(aweme_id: str, proxy: str) -> dict:
+    """路由 2：移动端 feed 接口（app 协议），无 cookie / 签名，但 bit_rate 只有一档。"""
+    params = {
+        "aweme_id": aweme_id,
+        "aid": "1128",
+        "version_name": "29.1.0",
+        "device_platform": "android",
+    }
+    last: Optional[Exception] = None
+    for host in _MOBILE_FEED_HOSTS:
+        try:
+            with httpx.Client(proxy=proxy or None, timeout=30.0, follow_redirects=True) as client:
+                resp = client.get(f"{host}/aweme/v1/feed/", params=params, headers={"User-Agent": _MOBILE_UA})
+            return _parse_detail_response(resp, f"移动端 feed {host}")
+        except Exception as e:  # noqa: PERF203
+            last = e
+    raise _DetailRouteFailed(f"移动端 feed 全部失败：{last}")
+
+
 def fetch_aweme_detail(
     aweme_id: str,
     cookiefile=None,
     cookiesfrombrowser=None,
     proxy: str = "",
 ) -> dict:
-    from fx_crawler_core.media_platform.douyin.help import get_a_bogus_from_js
+    """
+    抖音作品详情，按顺序尝试：
+      1. open.douyin.com 免签名请求（无需 cookie，画质列表完整）
+      2. 移动端 feed 接口（无需 cookie，单一画质）
+      3. 旧版 www.douyin.com + cookie + a_bogus 签名路由（Argus 网关上线后基本不通，仅兜底）
+    """
+    cookie_dict: Dict[str, str] = {}
+    if cookiefile or cookiesfrombrowser:
+        try:
+            cookie_dict = get_cookie_dict(cookiefile, cookiesfrombrowser) or {}
+        except Exception as e:
+            logger.warning("[fx_video] 抖音 cookie 读取失败，按无 cookie 继续：%s", e)
 
-    cookie_dict = get_cookie_dict(cookiefile, cookiesfrombrowser)
+    errors = []
+    for name, fn in (
+        ("open", lambda: _fetch_detail_open_route(aweme_id, cookie_dict, proxy)),
+        ("mobile", lambda: _fetch_detail_mobile_route(aweme_id, proxy)),
+    ):
+        try:
+            detail = fn()
+            logger.info("[fx_video] 抖音详情路由 %s 成功 %s", name, aweme_id)
+            return detail
+        except Exception as e:
+            logger.warning("[fx_video] 抖音详情路由 %s 失败：%s", name, e)
+            errors.append(str(e))
+
     if not cookie_dict:
         raise RuntimeError(
-            "抖音下载需要登录 cookie。\n"
-            "请在节点里选「cookie文本」或「fx_crawler浏览器」（先用采集节点登录抖音）。"
+            "抖音详情获取失败（免签名路由与移动端路由都不通）。\n"
+            + "\n".join(f"  - {e}" for e in errors)
+            + "\n可在节点里接入登录 cookie（cookie文本 / fx_crawler浏览器）后重试兜底路由。"
         )
+    try:
+        return _fetch_aweme_detail_signed(aweme_id, cookie_dict, proxy)
+    except Exception as e:
+        errors.append(str(e))
+        raise RuntimeError(
+            "抖音详情获取失败：\n" + "\n".join(f"  - {x}" for x in errors)
+        ) from e
+
+
+def _fetch_aweme_detail_signed(aweme_id: str, cookie_dict: Dict[str, str], proxy: str = "") -> dict:
+    """路由 3（兜底）：www.douyin.com + cookie + a_bogus 签名。"""
+    from fx_crawler_core.media_platform.douyin.help import get_a_bogus_from_js
 
     headers = {
         "User-Agent": _UA,
@@ -102,32 +214,20 @@ def fetch_aweme_detail(
         "Referer": f"https://www.douyin.com/video/{aweme_id}",
         "Accept": "application/json, text/plain, */*",
     }
+    uifid = cookie_dict.get("UIFID") or cookie_dict.get("UIFID_TEMP")
+    if uifid:
+        headers["uifid"] = uifid
     params = {"aweme_id": aweme_id}
     params.update(_douyin_common_params(cookie_dict))
 
-    uri = "/aweme/v1/web/aweme/detail/"
+    uri = _DETAIL_URI
     query_string = urllib.parse.urlencode(params)
     params["a_bogus"] = get_a_bogus_from_js(uri, query_string, _UA)
     url = f"https://www.douyin.com{uri}?" + urllib.parse.urlencode(params)
 
     with httpx.Client(proxy=proxy or None, timeout=30.0, follow_redirects=True) as client:
         resp = client.get(url, headers=headers)
-        try:
-            data = resp.json()
-        except Exception as e:
-            raise RuntimeError(f"抖音详情 API 返回非 JSON（HTTP {resp.status_code}）") from e
-
-    if not data or data.get("status_code") not in (0, None):
-        msg = data.get("status_msg") or data
-        raise RuntimeError(f"抖音详情 API 失败：{msg}")
-
-    detail = data.get("aweme_detail") or {}
-    if not detail:
-        raise RuntimeError(
-            "抖音详情为空（cookie 可能过期或未登录）。\n"
-            "请重新登录抖音后再试，或改用「Playwright(备用)」拉列表。"
-        )
-    return detail
+    return _parse_detail_response(resp, "www.douyin 签名路由")
 
 
 def _extract_video_download_url(aweme_detail: dict) -> str:
