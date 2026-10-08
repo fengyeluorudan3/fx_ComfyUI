@@ -110,7 +110,6 @@ def get_a_bogus_from_js(url: str, params: str, user_agent: str):
 
 
 async def get_a_bogus_from_playwright(params: str, post_data, user_agent: str, page: Page):
-    # post_data 可能被置为 ""（无 body）；去掉 dict 标注，否则 Cython 按注解做强类型校验会编译失败
     """
     Get a_bogus parameter through playwright
     playwright version is deprecated
