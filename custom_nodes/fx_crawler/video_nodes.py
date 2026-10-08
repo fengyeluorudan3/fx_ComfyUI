@@ -233,7 +233,9 @@ def _ffmpeg_location():
         return os.path.dirname(exe)
     try:
         import imageio_ffmpeg
-        return os.path.dirname(imageio_ffmpeg.get_ffmpeg_exe())
+        # 自带的二进制叫 ffmpeg-win-x86_64-v7.1.exe 这类名字，yt-dlp 在目录里只认 ffmpeg(.exe)，
+        # 必须传完整路径（没装系统 ffmpeg 的 Windows 用户合并音视频全靠它）
+        return imageio_ffmpeg.get_ffmpeg_exe()
     except Exception:
         return None
 
