@@ -109,7 +109,7 @@ def get_a_bogus_from_js(url: str, params: str, user_agent: str):
 
 
 
-async def get_a_bogus_from_playwright(params: str, post_data: dict, user_agent: str, page: Page):
+async def get_a_bogus_from_playwright(params: str, post_data, user_agent: str, page: Page):
     """
     Get a_bogus parameter through playwright
     playwright version is deprecated

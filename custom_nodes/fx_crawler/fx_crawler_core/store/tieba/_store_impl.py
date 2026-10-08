@@ -245,7 +245,6 @@ class TieBaMongoStoreImplement(AbstractStore):
     async def store_creator(self, creator_item: Dict):
         # 教学版：创作者个人资料不再落库
         pass
-        utils.logger.info(f"[TieBaMongoStoreImplement.store_creator] Saved creator {user_id} to MongoDB")
 
 
 class TieBaExcelStoreImplement:
