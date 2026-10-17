@@ -1,0 +1,27 @@
+{
+  "rhythm_basis": "pacing_grid",
+  "derived_from": {"modalities":["image"],"primary_driver":"image"},
+  "total_duration_sec": 12,
+  "cut_plan": [
+    {"segment_id":"seg_01","cut_timestamps":[0,2.5,5],"derived_from":"pacing_grid"},
+    {"segment_id":"seg_02","cut_timestamps":[5,7.5,9],"derived_from":"pacing_grid"},
+    {"segment_id":"seg_03","cut_timestamps":[9,10.5,12],"derived_from":"pacing_grid"}
+  ],
+  "segment_timeline": [
+    {"id":"seg_01","start_sec":0,"end_sec":5,"primary_ammo_ids":["perf_silky_001"],"image_expansion":"从完整产品定帧开始，进行极慢推近，保持瓶体结构、液面和高光稳定。"},
+    {"id":"seg_02","start_sec":5,"end_sec":9,"primary_ammo_ids":["perf_silky_001"],"image_expansion":"轻微展示黑色瓶盖、玻璃折射与琥珀液体，镜面倒影随视角自然变化。"},
+    {"id":"seg_03","start_sec":9,"end_sec":12,"primary_ammo_ids":["perf_silky_001"],"image_expansion":"回到完整英雄构图并保持静止收束，软光与渐变背景连续。"}
+  ],
+  "audiovisual_mapping": {"primary_reference":"perf_silky_001","motion_style":"restrained product micro-motion"},
+  "text_creative_plan": null,
+  "reference_video_analysis": null,
+  "ammo_catalog_summary": {
+    "images": [{"ammo_id":"perf_silky_001","local_path":"input/ComfyUI_00571_.png","category":"product","image_reading":{"visible_elements":["透明方形玻璃瓶身","均匀琥珀色液体","黑色亮面瓶盖","深色镜面台面及倒影"],"color_palette":["深黑","透明玻璃","暖琥珀","冷灰"],"mood_keywords":["安静奢华","静谧","精确","高级"],"narrative_seeds":["从暗处显现","材质揭示","英雄定帧"],"framing":"CU","has_human":false,"has_readable_text":false},"expansion_allowed":["slow_push","controlled_soft_light","micro_parallax"],"expansion_forbidden":["改变瓶体结构","改变液面或液体颜色","添加人物和无关装饰","改变瓶盖材质"],"recommended_roles":["product_hero","hook_detail","brand_close"],"track_fit_notes":"适合安静奢华的9:16香水产品片。"}]
+  },
+  "beat_grid": null,
+  "pacing_grid": {"style":"apple_product_film","visual_beats":["dark emergence","material reveal","hero hold"]},
+  "music_metadata": null,
+  "song_structure_segments": [],
+  "lyrics_and_sentiment_alignment": [],
+  "risk_flags": ["无音频，节奏由pacing_grid驱动","单张锚图扩展需保持液面、折射和倒影连续"]
+}

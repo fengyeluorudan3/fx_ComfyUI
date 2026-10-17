@@ -1,5 +1,6 @@
 import asyncio
 import io
+import json
 import os
 import shutil
 import tempfile
@@ -289,15 +290,13 @@ async def _publish_async(platform, video, video_path, title, content, tags, cove
         if resolved_cover and not Path(resolved_cover).expanduser().is_file():
             raise ValueError(f"封面文件不存在: {resolved_cover}")
 
-        if headed == "yes":
-            os.environ["SPREADO_KEEP_BROWSER_OPEN_SECONDS"] = str(int(keep_open_seconds))
-
         cookie_path = str(cookies_path).strip() or None
         uploader = _get_uploader_cls(platform)(
             cookie_file_path=Path(cookie_path).expanduser() if cookie_path else None,
             headless=headed != "yes",
         )
         uploader._skip_publish = no_publish == "yes"
+        uploader._keep_open_seconds = max(0, int(keep_open_seconds)) if headed == "yes" else 0
         # 平台特有参数（如 B站分区/创作声明）以属性形式注入 uploader
         for key, value in (uploader_attrs or {}).items():
             setattr(uploader, key, value)
@@ -311,9 +310,10 @@ async def _publish_async(platform, video, video_path, title, content, tags, cove
             auto_login=True,
         )
         if not ok:
-            raise RuntimeError(f"{platform} 发布失败")
+            reason = str(getattr(uploader, "last_error", "") or "").strip()
+            raise RuntimeError(f"{platform} 发布失败" + (f": {reason}" if reason else "，请查看 debug_dir 中的步骤截图与日志"))
         return {
-            "status": "success",
+            "status": "preview_ready" if no_publish == "yes" else "success",
             "run_id": uploader.run_id,
             "debug_dir": str(uploader.debug_dir),
         }
@@ -348,7 +348,9 @@ def _publish(platform, video, video_path, title, content, tags, cover, cover_pat
         no_publish,
         uploader_attrs=uploader_attrs,
     ))
-    return {"result": (result["status"], result["run_id"], result["debug_dir"])}
+    receipt = {"platform": platform, "status": result["status"], "run_id": result["run_id"], "debug_dir": result["debug_dir"]}
+    return {"ui": {"text": [json.dumps(receipt, ensure_ascii=False)]},
+            "result": (result["status"], result["run_id"], result["debug_dir"])}
 
 
 class _BasePublishNode:
@@ -371,7 +373,7 @@ class _BasePublishNode:
                     },
                 ),
                 "headed": (["yes", "no"], {"default": "yes"}),
-                "keep_open_seconds": ("INT", {"default": 60, "min": 0, "max": 3600}),
+                "keep_open_seconds": ("INT", {"default": 0, "min": 0, "max": 3600}),
                 "no_publish": (["no", "yes"], {"default": "no"}),
             },
             "optional": {

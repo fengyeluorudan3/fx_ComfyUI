@@ -28,13 +28,13 @@ Pair = Tuple[str, str]  # (download_url, title)
 Item = Tuple[str, str, str]  # (download_url, title, kind) kind: video | image
 
 
-def get_cookie_dict(cookiefile=None, cookiesfrombrowser=None) -> Dict[str, str]:
+def get_cookie_dict(cookiefile=None, cookiesfrombrowser=None, domain_filter: str = "") -> Dict[str, str]:
     """从 Netscape cookies 文件或本机/插件 Chrome 配置读取 cookie 字典。"""
     try:
         import yt_dlp
         from yt_dlp.cookies import load_cookies
     except ImportError:
-        return _load_netscape_cookie_dict(cookiefile)
+        return _load_netscape_cookie_dict(cookiefile, domain_filter)
 
     class _Log:
         def debug(self, msg):
@@ -52,23 +52,31 @@ def get_cookie_dict(cookiefile=None, cookiesfrombrowser=None) -> Dict[str, str]:
     try:
         with yt_dlp.YoutubeDL({"quiet": True, "no_warnings": True, "logger": _Log()}) as ydl:
             jar = load_cookies(cookiefile, cookiesfrombrowser, ydl)
-        return {c.name: c.value for c in jar}
+        domain = domain_filter.lstrip(".").lower()
+        return {
+            c.name: c.value for c in jar
+            if not domain or str(c.domain or "").lstrip(".").lower() == domain
+            or str(c.domain or "").lstrip(".").lower().endswith("." + domain)
+        }
     except Exception as e:
         logger.warning("[fx_video] yt-dlp 读 cookie 失败: %s", e)
-        return _load_netscape_cookie_dict(cookiefile)
+        return _load_netscape_cookie_dict(cookiefile, domain_filter)
 
 
-def _load_netscape_cookie_dict(cookiefile: Optional[str]) -> Dict[str, str]:
+def _load_netscape_cookie_dict(cookiefile: Optional[str], domain_filter: str = "") -> Dict[str, str]:
     if not cookiefile or not os.path.isfile(cookiefile):
         return {}
     out: Dict[str, str] = {}
+    domain = domain_filter.lstrip(".").lower()
     with open(cookiefile, "r", encoding="utf-8") as f:
         for line in f:
             if not line or line.startswith("#"):
                 continue
             parts = line.split("\t")
             if len(parts) >= 7:
-                out[parts[5]] = parts[6].strip()
+                cookie_domain = parts[0].lstrip(".").lower()
+                if not domain or cookie_domain == domain or cookie_domain.endswith("." + domain):
+                    out[parts[5]] = parts[6].strip()
     return out
 
 

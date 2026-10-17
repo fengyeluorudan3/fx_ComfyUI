@@ -32,6 +32,7 @@ venv*/
 /tests-ui/data/object_info.json
 /user/
 *.log
+/logs/
 web_custom_versions/
 .DS_Store
 filtered-openapi.yaml

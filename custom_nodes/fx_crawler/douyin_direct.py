@@ -51,7 +51,7 @@ def _resolve_aweme_id(url: str, proxy: str = "") -> str:
 def _douyin_common_params(cookie_dict: Dict[str, str]) -> Dict[str, str]:
     from fx_crawler_core.media_platform.douyin.help import get_web_id
 
-    return {
+    params = {
         "device_platform": "webapp",
         "aid": "6383",
         "channel": "channel_pc_web",
@@ -79,6 +79,12 @@ def _douyin_common_params(cookie_dict: Dict[str, str]) -> Dict[str, str]:
         "webid": get_web_id(),
         "msToken": cookie_dict.get("msToken") or cookie_dict.get("xmst") or "",
     }
+    # 抖音 detail 的风控会同时校验浏览器身份与指纹；二者必须来自同一份 Cookie。
+    uifid = cookie_dict.get("UIFID") or cookie_dict.get("UIFID_TEMP") or ""
+    fingerprint = cookie_dict.get("s_v_web_id") or ""
+    if uifid and fingerprint:
+        params.update({"uifid": uifid, "verifyFp": fingerprint, "fp": fingerprint})
+    return params
 
 
 _DETAIL_URI = "/aweme/v1/web/aweme/detail/"
@@ -172,7 +178,9 @@ def fetch_aweme_detail(
     cookie_dict: Dict[str, str] = {}
     if cookiefile or cookiesfrombrowser:
         try:
-            cookie_dict = get_cookie_dict(cookiefile, cookiesfrombrowser) or {}
+            cookie_dict = get_cookie_dict(
+                cookiefile, cookiesfrombrowser, domain_filter="douyin.com"
+            ) or {}
         except Exception as e:
             logger.warning("[fx_video] 抖音 cookie 读取失败，按无 cookie 继续：%s", e)
 
@@ -213,6 +221,7 @@ def _fetch_aweme_detail_signed(aweme_id: str, cookie_dict: Dict[str, str], proxy
         "Cookie": cookie_header(cookie_dict),
         "Referer": f"https://www.douyin.com/video/{aweme_id}",
         "Accept": "application/json, text/plain, */*",
+        "x-tt-argus": "1",
     }
     uifid = cookie_dict.get("UIFID") or cookie_dict.get("UIFID_TEMP")
     if uifid:
@@ -227,13 +236,30 @@ def _fetch_aweme_detail_signed(aweme_id: str, cookie_dict: Dict[str, str], proxy
 
     with httpx.Client(proxy=proxy or None, timeout=30.0, follow_redirects=True) as client:
         resp = client.get(url, headers=headers)
+        if resp.status_code == 403:
+            has_identity = bool(params.get("uifid") and params.get("verifyFp"))
+            if not has_identity:
+                raise RuntimeError(
+                    "抖音详情请求被拒绝（HTTP 403）：当前 Cookie 缺少同源的 "
+                    "UIFID/UIFID_TEMP 与 s_v_web_id。请在 Chrome 打开并播放该视频，"
+                    "刷新本机 Chrome 的抖音 Cookie 后重试。"
+                )
+            reason = "网关签名校验未通过" if "Signature Not Found" in resp.text else "浏览器登录态或指纹校验未通过"
+            raise RuntimeError(
+                f"抖音详情请求被拒绝（HTTP 403）：{reason}。"
+                "请在本机 Chrome 打开并播放该视频，再重新读取 Cookie；"
+                "若浏览器也无法播放，请检查视频权限或地区限制。"
+            )
     return _parse_detail_response(resp, "www.douyin 签名路由")
 
 
 def _extract_video_download_url(aweme_detail: dict) -> str:
-    from fx_crawler_core.store.douyin import _extract_video_download_url as _store_extract
-
-    return _store_extract(aweme_detail)
+    video = aweme_detail.get("video") or {}
+    for key in ("play_addr_h264", "play_addr_256", "play_addr"):
+        urls = (video.get(key) or {}).get("url_list") or []
+        if urls:
+            return urls[-1]
+    return ""
 
 
 def _slim_info(detail: dict, webpage_url: str) -> dict:
@@ -302,9 +328,12 @@ def probe_douyin(
 
 
 def _extract_note_image_urls(aweme_detail: dict) -> list[str]:
-    from fx_crawler_core.store.douyin import _extract_note_image_list
-
-    return [u for u in _extract_note_image_list(aweme_detail) if isinstance(u, str) and u.strip()]
+    urls = []
+    for image in aweme_detail.get("images") or []:
+        candidates = image.get("url_list") or []
+        if candidates:
+            urls.append(candidates[-1])
+    return [u for u in urls if isinstance(u, str) and u.strip()]
 
 
 def download_douyin_images(

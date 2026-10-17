@@ -124,7 +124,7 @@ class DouYinUploader(BasePublisher):
                     page,
                     "publish_video",
                     lambda: self._publish_video(page),
-                    retries=2,
+                    retries=0,
                     delay=2.0,
                 )
             return True

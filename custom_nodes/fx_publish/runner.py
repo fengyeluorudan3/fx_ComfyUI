@@ -53,7 +53,8 @@ async def main(payload_path):
             uploader_attrs=payload.get("uploader_attrs") or None,
         )
         result.update(
-            ok=out.get("status") == "success",
+            ok=out.get("status") in ("preview_ready", "success"),
+            status=out.get("status", ""),
             run_id=out.get("run_id", ""),
             debug_dir=out.get("debug_dir", ""),
         )

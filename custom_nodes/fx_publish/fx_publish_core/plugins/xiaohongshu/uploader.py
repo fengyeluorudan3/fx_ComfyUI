@@ -89,7 +89,7 @@ class XiaoHongShuUploader(BasePublisher):
                 if await self._should_skip_publish(page):
                     return True
 
-                await self._stable_step(page, "publish_video", lambda: self._publish_video(page), retries=2, delay=2.0)
+                await self._stable_step(page, "publish_video", lambda: self._publish_video(page), retries=0)
             return True
         except Exception as e:
             self.logger.error("upload_video 异常", reason=str(e)[:200])
@@ -615,30 +615,18 @@ class XiaoHongShuUploader(BasePublisher):
                 # 发布按钮是 <xhs-publish-btn> 自定义 Web Component，内容渲染在
                 # closed shadow DOM 里（innerText 为空、locator 摸不到内部按钮）。
                 # 2026-07 实测：组件是整条按钮容器（"暂存离开"+"发布"两颗按钮），
-                # "发布"红按钮中心在容器宽度 ~60% 处，容器正中(50%)是两按钮间的
-                # 空隙——所以只能用真实鼠标坐标按比例点击，多个偏移依次兜底。
+                # "发布"红按钮中心在容器宽度 ~60% 处。最终提交只能点击一次：
+                # 结果回执超时并不代表没提交，重复坐标点击可能产生多篇笔记。
                 try:
                     box = await publish_btn.bounding_box()
                 except Exception:
                     box = None
                 if box:
                     cy = box["y"] + box["height"] / 2
-                    for ratio in (0.60, 0.68, 0.55, 0.75):
-                        cx = box["x"] + box["width"] * ratio
-                        await page.mouse.click(cx, cy)
-                        self.logger.info(
-                            "已坐标点击发布按钮", ratio=ratio, x=round(cx), y=round(cy)
-                        )
-                        await page.wait_for_timeout(3000)
-                        if await _check_publish_success():
-                            self.logger.info("发布成功(按钮点击)", ratio=ratio)
-                            return True
-                        # 可能弹出确认弹窗，交给下方步骤 2 处理后再检测
-                        confirm = page.locator(
-                            'button:has-text("确认发布"), button:has-text("确认")'
-                        ).last
-                        if await confirm.count() > 0 and await confirm.is_visible():
-                            break
+                    cx = box["x"] + box["width"] * 0.60
+                    await page.mouse.click(cx, cy)
+                    self.logger.info("已坐标点击发布按钮", x=round(cx), y=round(cy))
+                    await page.wait_for_timeout(3000)
                 else:
                     await publish_btn.click(timeout=5000, force=True)
                     self.logger.info("已点击发布按钮(降级 force click)")
@@ -660,15 +648,7 @@ class XiaoHongShuUploader(BasePublisher):
                         return True
                     break
 
-            # 3) 快捷键兜底（mac 上是 Cmd+Enter，用 ControlOrMeta 跨平台）
-            self.logger.info("尝试 ControlOrMeta+Enter 发布...")
-            await page.keyboard.press("ControlOrMeta+Enter")
-            await page.wait_for_timeout(3000)
-            if await _check_publish_success():
-                self.logger.info("发布成功(快捷键)")
-                return True
-
-            # 4) 等待结果（兜底）
+            # 3) 只等回执，不再次提交；无法确认时交给人工查看后台。
             success = False
             start = time.monotonic()
             while time.monotonic() - start < 15:

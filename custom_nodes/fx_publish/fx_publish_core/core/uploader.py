@@ -66,6 +66,8 @@ class BaseUploader(ABC):
         # no_publish 调试模式：完成所有填写但不点击最终发布。
         # 必须在基类声明，所有平台的发布步骤都要检查它（见 _should_skip_publish）。
         self._skip_publish = False
+        self._keep_open_seconds = None
+        self.last_error = ""
         self._run_id = time.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
         self._debug_dir = (
             Path.cwd() / "logs" / "fx_publish_debug" / self.platform_name / self._run_id
@@ -76,12 +78,23 @@ class BaseUploader(ABC):
 
         self._cdp_port 由节点层注入；为 None 时行为和以前完全一致（新开隐身浏览器）。
         """
-        return await StealthBrowser.create(
-            headless=headless,
-            channel=channel,
-            cdp_port=getattr(self, "_cdp_port", None),
-            cdp_autostart=getattr(self, "_cdp_autostart", True),
-        )
+        port = getattr(self, "_cdp_port", None)
+        autostart = getattr(self, "_cdp_autostart", True)
+        try:
+            return await StealthBrowser.create(
+                headless=headless, channel=channel,
+                cdp_port=port, cdp_autostart=autostart,
+                keep_open_seconds=self._keep_open_seconds,
+            )
+        except RuntimeError as exc:
+            if not port or not autostart or "调试端口" not in str(exc):
+                raise
+            self.logger.warning("无法复用当前 Chrome，改用可见浏览器；如无登录态请扫码登录", reason=str(exc)[:160])
+            return await StealthBrowser.create(
+                headless=False, channel=channel,
+                cdp_port=None, cdp_autostart=False,
+                keep_open_seconds=self._keep_open_seconds,
+            )
 
     async def _should_skip_publish(self, page: Page) -> bool:
         """no_publish 模式：保存现场并返回 True，调用方直接跳过发布步骤。"""
@@ -266,6 +279,7 @@ class BaseUploader(ABC):
         thumbnail_path: Optional[str | Path] = None,
         auto_login: bool = False,
     ) -> bool:
+        self.last_error = ""
         try:
             with self.logger.step("upload_video_flow", title=title) as step:
                 cookie_usable = (
@@ -340,6 +354,7 @@ class BaseUploader(ABC):
                     step.add_field(result="success" if ok else "failure")
                     return ok
         except Exception as e:
+            self.last_error = str(e)[:500]
             self.logger.error("上传流程异常", reason=str(e)[:200])
             return False
 
@@ -810,9 +825,12 @@ class BaseUploader(ABC):
                 if result is False:
                     raise RuntimeError(f"{name} returned False")
                 self.logger.info("步骤完成", step=name, attempt=attempt, url=page.url)
+                self.last_error = ""
                 return result
             except Exception as exc:
                 last_error = exc
+                if not self.last_error or str(exc) != f"{name} returned False":
+                    self.last_error = f"{name}: {exc}"[:500]
                 # 页面/浏览器已关闭：重试和截图都不可能成功，立即中止整个流程
                 if _is_page_closed_error(exc):
                     self.logger.error(

@@ -149,6 +149,7 @@ class StealthBrowser:
         executable_path: Optional[str] = None,
         cdp_port: Optional[int] = None,
         cdp_autostart: bool = True,
+        keep_open_seconds: Optional[int] = None,
     ):
         """
         :param headless: 是否无头模式
@@ -163,6 +164,10 @@ class StealthBrowser:
         self.executable_path = executable_path
         self.cdp_port = int(cdp_port) if cdp_port else None
         self.cdp_autostart = cdp_autostart
+        self.keep_open_seconds = (
+            max(0, int(keep_open_seconds)) if keep_open_seconds is not None
+            else max(0, int(os.environ.get("SPREADO_KEEP_BROWSER_OPEN_SECONDS", "60")))
+        )
 
         self.playwright: Optional[Playwright] = None
         self.browser: Optional[Browser] = None
@@ -180,10 +185,15 @@ class StealthBrowser:
         executable_path: Optional[str] = None,
         cdp_port: Optional[int] = None,
         cdp_autostart: bool = True,
+        keep_open_seconds: Optional[int] = None,
     ) -> "StealthBrowser":
         """工厂方法"""
-        instance = cls(headless, channel, executable_path, cdp_port, cdp_autostart)
-        await instance.__aenter__()
+        instance = cls(headless, channel, executable_path, cdp_port, cdp_autostart, keep_open_seconds)
+        try:
+            await instance.__aenter__()
+        except Exception as exc:
+            await instance.__aexit__(type(exc), exc, exc.__traceback__)
+            raise
         return instance
 
     def _get_browser_config(self) -> tuple[dict, str]:
@@ -348,12 +358,7 @@ class StealthBrowser:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         # 仅正常结束时按配置保留浏览器窗口；异常退出（发布失败/页面被关）直接关闭，
         # 避免无人值守场景每次失败都空等一分钟。
-        keep_open_seconds = 0
-        if (not self.headless or self.attached) and exc_type is None:
-            try:
-                keep_open_seconds = int(os.environ.get("SPREADO_KEEP_BROWSER_OPEN_SECONDS", "60"))
-            except ValueError:
-                keep_open_seconds = 60
+        keep_open_seconds = self.keep_open_seconds if (not self.headless or self.attached) and exc_type is None else 0
         if keep_open_seconds > 0:
             print(f"[Browser] Keeping browser open for {keep_open_seconds}s before close")
             await asyncio.sleep(keep_open_seconds)

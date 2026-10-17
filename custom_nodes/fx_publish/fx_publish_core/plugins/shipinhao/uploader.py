@@ -206,7 +206,7 @@ class ShiPinHaoUploader(BasePublisher):
                 if await self._should_skip_publish(page):
                     return True
 
-                await self._stable_step(page, "publish_video", lambda: self._publish_video(page), retries=2, delay=2.0)
+                await self._stable_step(page, "publish_video", lambda: self._publish_video(page), retries=0)
             return True
         except Exception as e:
             self.logger.error("upload_video 异常", reason=str(e)[:200])
