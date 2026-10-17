@@ -28,7 +28,10 @@ import random
 import re
 from typing import Optional
 
-import execjs
+try:
+    import execjs
+except ImportError:
+    execjs = None
 from playwright.async_api import Page
 
 from fx_crawler_core.model.m_douyin import VideoUrlInfo, CreatorUrlInfo
@@ -47,6 +50,8 @@ def _get_douyin_sign_obj():
         return _douyin_sign_obj
     prepare_execjs_node()
     try:
+        if execjs is None:
+            raise RuntimeError("PyExecJS unavailable")
         runtime_name = execjs.get().name
         if "Node" not in runtime_name:
             raise execjs.RuntimeUnavailableError(f"need Node.js runtime, got {runtime_name}")

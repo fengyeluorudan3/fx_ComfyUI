@@ -29,9 +29,17 @@ Critical steps retry before moving to the next step:
 - file upload: retry 2 times
 - upload completion wait: retry 2 times
 - metadata filling: retry 3 times
-- publish submit/result: retry 2 times
+- final publish submit: one attempt; an unconfirmed result must be checked in the platform backend before any retry
 
 Optional steps such as cover upload may fail without blocking when the platform supports publishing without them.
+
+`status=preview_ready` means form filling passed with `no_publish=yes`; it does not mean the platform saved a draft. `status=success` means the platform showed a submission-success signal, not that moderation has finished. The node also writes this receipt to ComfyUI history so FXAgent can read it.
+
+## Verification Status (2026-10-17)
+
+An 8-second H.264 video from `ComfyUI/output` was used for a Douyin `no_publish=yes` node smoke test. The existing Chrome process occupied port 9222 but returned HTTP 404 for `/json/version`, so CDP attachment was unavailable. A new visible browser reached `creator.douyin.com`; the run then timed out waiting for login and **did not upload or publish** the video. The uploader now falls back from an unavailable Chrome attachment to a visible login browser. The timeout evidence showed the login form still visible despite a `/content/upload` URL; URL alone is not proof of authentication.
+
+A separate live browser test in the user's already authenticated Chrome uploaded that same output video to Douyin, filled the title and description, showed both in the preview, and reached the platform's `作品未见异常` check result. The final publish and save-draft buttons were **not clicked**. This confirms the current site accepts the file and exposes the expected edit fields. It does **not** count as an authenticated `fx_publish` node pass because the node cannot attach to this Chrome session; the 2026-07-14 node results below are historical evidence, not a current pass.
 
 ## Troubleshooting
 

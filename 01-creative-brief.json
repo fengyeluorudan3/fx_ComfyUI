@@ -1,0 +1,105 @@
+{
+  "project_metadata": {
+    "duration_strategy": "auto",
+    "duration_seconds": null,
+    "language": "en",
+    "video_ratio": "9:16",
+    "visual_style_name": "Minimal Amber Glass Luxury",
+    "visual_style_description": "Physically honest premium product cinematography: a square clear perfume bottle with amber liquid and glossy black cap, centered on a reflective dark surface, lit by a large diffused source from upper-left against a seamless warm gradient.",
+    "music_genre_hint": ""
+  },
+  "core_concept": {
+    "title": "From This.",
+    "one_liner": "A quiet luxury perfume object emerges from darkness through controlled light, glass, amber liquid, and reflection.",
+    "artistic_intent": "Preserve the still image's material truth while introducing restrained motion that keeps the cap highlight, glass refraction, liquid meniscus, and reflection physically coherent.",
+    "emotional_core": "Quiet, tactile, precise, premium.",
+    "narrative_mode": "mood_montage"
+  },
+  "mood_and_tone": {
+    "primary_mood": ["quiet luxury", "minimal", "tactile", "confident"],
+    "color_palette_keywords": ["deep black", "clear glass", "warm amber", "soft beige", "charcoal gray"],
+    "lighting_character": "Large diffused key light from upper-left, with broad stable highlights and gentle edge illumination.",
+    "camera_personality": "Locked, deliberate, product-focused; approximately 65mm perspective with a slight upward pitch.",
+    "texture_and_grain": "Clean commercial image, smooth gradients, controlled micro-detail, no visible film grain.",
+    "what_to_avoid": ["hard specular flashes", "unstable liquid surface", "warped bottle geometry", "gradient banding", "excessive camera movement"]
+  },
+  "characters_and_relationships": {
+    "protagonist": {
+      "role": "hero product",
+      "description": "Square transparent perfume bottle filled with uniform deep amber liquid, topped by a glossy black rounded cap.",
+      "performance_style": "Static hero presence with restrained reveal or micro-parallax only.",
+      "wardrobe_notes": "None; material anchors are clear glass, amber liquid, black gloss cap, and metallic atomizer stem."
+    },
+    "ensemble": [],
+    "relationship_dynamic": "The product is the sole subject; light and reflection act as supporting visual partners."
+  },
+  "subject_list": [
+    {
+      "subject_id": "hero_perfume_bottle",
+      "role": "hero product",
+      "appearance_anchor": "Centered square clear-glass perfume bottle, rounded black glossy cap, deep amber liquid, visible central atomizer stem.",
+      "wardrobe_anchor": "Clear glass, warm amber liquid, black gloss cap; no label or extra decoration."
+    }
+  ],
+  "core_imagery_and_symbolism": [
+    {
+      "symbol": "amber liquid",
+      "meaning": "Concentrated warmth and fragrance essence",
+      "recurrence_hint": "Keep the liquid level, color, and volume stable across motion."
+    },
+    {
+      "symbol": "reflection",
+      "meaning": "Luxury, depth, and material presence",
+      "recurrence_hint": "Use a soft vertically fading reflection aligned with the bottle."
+    },
+    {
+      "symbol": "soft highlight",
+      "meaning": "Controlled precision and premium finish",
+      "recurrence_hint": "Maintain the broad cap highlight without flicker or jumping."
+    }
+  ],
+  "narrative_flow": {
+    "structure_summary": "Begin in a dark, quiet product space; reveal the bottle through the warm gradient and stable soft light; end on a composed hero hold where glass, amber liquid, black cap, and reflection read clearly.",
+    "act_beats": [
+      {"beat_name": "dark emergence", "purpose": "Establish restrained mystery and silhouette", "energy": "low"},
+      {"beat_name": "material reveal", "purpose": "Reveal glass edges, amber fill, and cap highlight", "energy": "medium"},
+      {"beat_name": "hero hold", "purpose": "Lock the premium product image and reflection", "energy": "low"}
+    ],
+    "climax_placement": "Final third: the most complete and stable hero view."
+  },
+  "location_and_world": {
+    "primary_settings": ["minimal studio product set"],
+    "environment_textures": ["dark reflective tabletop", "seamless smoky gray-to-warm gradient background", "clear glass refraction"],
+    "time_of_day": "timeless studio",
+    "weather_atmosphere": "still, clean, controlled air"
+  },
+  "scene_list": [
+    {
+      "scene_id": "studio_hero_reflection",
+      "description": "Centered perfume bottle on a dark reflective surface, pale gray upper background transitioning toward warm amber near the lower right.",
+      "lighting_anchor": "Large diffused upper-left key with stable soft highlights and subtle glass edge illumination."
+    }
+  ],
+  "constraints_and_non_goals": {
+    "no_polished_set_design": false,
+    "no_linear_plot": true,
+    "must_have_elements": ["centered hero bottle", "glossy black cap", "uniform amber liquid", "clear glass edge refraction", "soft tabletop reflection", "stable upper-left key light"],
+    "explicit_exclusions": ["hands or people", "additional props", "label changes", "liquid splashing", "bubbles appearing", "cap deformation", "strong handheld motion", "hard background transitions"]
+  },
+  "input_inventory": {
+    "text": true,
+    "audio": [],
+    "video": [],
+    "image": ["input/ComfyUI_00571_.png"]
+  },
+  "image_analysis": {
+    "key_light": "upper-left, large diffused soft source",
+    "cap_highlight": "elongated curved rectangular band on the upper-mid front of the glossy cap",
+    "glass_edge": "smooth gradual refractive bright edges following both curved side contours",
+    "liquid": "deep warm amber, highly uniform and clear, level meniscus",
+    "reflection": "soft vertical reflection beneath the bottle, strongest near contact and gradually fading downward",
+    "background": "seamless linear warm gradient from pale gray/off-white upper area toward darker warm amber lower-right area",
+    "camera": "approximately 65mm medium telephoto, slight upward pitch around 8 degrees",
+    "negative_risks": ["cap highlight flicker or jumping", "liquid meniscus and fill level instability", "background gradient banding or drifting relative to the product"]
+  }
+}
