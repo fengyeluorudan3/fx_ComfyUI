@@ -7,6 +7,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+import logging
 from pathlib import Path
 from typing import Optional, Literal
 
@@ -22,6 +23,8 @@ from playwright_stealth import Stealth
 
 # 支持的浏览器通道
 BrowserChannel = Literal["chrome", "msedge", "chromium", None]
+_CDP_FAILURES: dict[int, float] = {}
+_CDP_CONNECTIONS = {}
 
 # 各平台常见浏览器路径
 BROWSER_PATHS = {
@@ -71,11 +74,29 @@ def cdp_endpoint_alive(port: int, timeout: float = 1.0) -> Optional[str]:
             json.loads(resp.read().decode("utf-8"))
         return url
     except Exception:
+        # Chrome 144+ consent-based debugging exposes its WebSocket through
+        # DevToolsActivePort; the legacy HTTP discovery route may return 404.
+        roots = {
+            "windows": Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/User Data",
+            "darwin": Path.home() / "Library/Application Support/Google/Chrome",
+            "linux": Path.home() / ".config/google-chrome",
+        }
+        root = roots.get(platform.system().lower())
+        try:
+            lines = (root / "DevToolsActivePort").read_text().splitlines() if root else []
+            if len(lines) >= 2 and int(lines[0]) == int(port) and lines[1].startswith("/devtools/browser/"):
+                return f"ws://127.0.0.1:{int(port)}{lines[1]}"
+        except (OSError, ValueError):
+            pass
         return None
 
 
 def _chrome_is_running() -> bool:
     """系统里是否已经有 Chrome 主进程在跑（不含 helper 子进程）。"""
+    if platform.system().lower() == "windows":
+        import psutil
+        return any((p.info.get("name") or "").lower() == "chrome.exe"
+                   for p in psutil.process_iter(["name"]))
     try:
         out = subprocess.run(
             ["ps", "-Ao", "command="], capture_output=True, text=True, timeout=10
@@ -148,7 +169,7 @@ class StealthBrowser:
         channel: BrowserChannel = None,
         executable_path: Optional[str] = None,
         cdp_port: Optional[int] = None,
-        cdp_autostart: bool = True,
+        cdp_autostart: bool = False,
         keep_open_seconds: Optional[int] = None,
     ):
         """
@@ -157,7 +178,7 @@ class StealthBrowser:
         :param executable_path: 浏览器可执行文件路径
         :param cdp_port: 给了就走「附加到已开着的 Chrome」模式，复用你自己的登录态，
                          不再新开隐身浏览器。headless/channel/executable_path 此时全部忽略。
-        :param cdp_autostart: CDP 端口没开时，是否自动用默认档案拉起一个带端口的 Chrome
+        :param cdp_autostart: 保留旧调用参数兼容；附加模式不会自动启动或切换浏览器。
         """
         self.headless = headless
         self.channel = channel
@@ -175,6 +196,7 @@ class StealthBrowser:
         self.browser_id = uuid.uuid4().hex[:8]
         # 附加模式下只能关我们自己开的标签页，绝不碰用户原有的窗口
         self.attached = False
+        self._pooled = False
         self._own_pages: list[Page] = []
 
     @classmethod
@@ -184,7 +206,7 @@ class StealthBrowser:
         channel: BrowserChannel = None,
         executable_path: Optional[str] = None,
         cdp_port: Optional[int] = None,
-        cdp_autostart: bool = True,
+        cdp_autostart: bool = False,
         keep_open_seconds: Optional[int] = None,
     ) -> "StealthBrowser":
         """工厂方法"""
@@ -245,29 +267,60 @@ class StealthBrowser:
         if self.browser is not None:
             return self
 
-        self.playwright = await async_playwright().start()
-
         # —— 附加模式：复用你已经开着、已经登录好的 Chrome，不新开浏览器 ——
         if self.cdp_port:
+            loop = asyncio.get_running_loop()
+            pool_key = (loop, self.cdp_port)
+            cached = _CDP_CONNECTIONS.get(pool_key)
+            if cached:
+                driver, browser, context = cached
+                if browser.is_connected():
+                    self.playwright, self.browser, self.context = cached
+                    self.attached = self._pooled = True
+                    logging.getLogger(__name__).info("Reusing authorized Chrome CDP connection port=%s", self.cdp_port)
+                    return self
+                _CDP_CONNECTIONS.pop(pool_key, None)
+                await driver.stop()
+            if time.monotonic() - _CDP_FAILURES.get(self.cdp_port, float('-inf')) < 60:
+                raise RuntimeError("同一 Chrome 连接刚刚失败，已停止其余平台重复连接；60 秒后或修复连接后再试。本次未上传或投稿。")
             endpoint = cdp_endpoint_alive(self.cdp_port)
             if not endpoint:
-                if not self.cdp_autostart:
-                    raise RuntimeError(
-                        f"调试端口 {self.cdp_port} 没开，且未允许自动启动。"
-                    )
-                endpoint = launch_chrome_with_cdp(self.cdp_port)
-            self.browser = await self.playwright.chromium.connect_over_cdp(endpoint)
+                raise RuntimeError(
+                    f"无法连接现有 Chrome 的调试端口 {self.cdp_port}。"
+                    "普通 Chrome 中已登录不代表已开放自动化连接；本次未打开新浏览器、未上传或投稿。"
+                    "请连接已启用远程调试的 Chrome，或主动选择“新开浏览器”并在发布浏览器登录一次。"
+                    "不要关闭用户的 Chrome，也不要重复执行同一节点尝试打开端口。"
+                )
+            try:
+                self.playwright = await asyncio.wait_for(async_playwright().start(), timeout=20)
+                self.browser = await asyncio.wait_for(
+                    self.playwright.chromium.connect_over_cdp(endpoint, timeout=45000), timeout=50,
+                )
+            except Exception as exc:
+                _CDP_FAILURES[self.cdp_port] = time.monotonic()
+                logging.getLogger(__name__).warning("Chrome CDP connection failed: %s", exc)
+                raise RuntimeError(
+                    "Chrome 调试连接未完成（连接最多等待 50 秒）。请检查浏览器连接授权或调试会话；"
+                    "本次未新开浏览器，也未上传或投稿。"
+                ) from exc
+            _CDP_FAILURES.pop(self.cdp_port, None)
+            self.attached = True
             # contexts[0] 就是你那个真实档案的上下文，带着全部登录 cookie
             self.context = (
                 self.browser.contexts[0]
                 if self.browser.contexts
-                else await self.browser.new_context()
+                else None
             )
-            self.attached = True
+            if self.context is None:
+                raise RuntimeError("Chrome 未提供可复用的用户上下文，请检查调试连接。")
+            if getattr(loop, "_fx_publish_keep_cdp", False):
+                _CDP_CONNECTIONS[pool_key] = (self.playwright, self.browser, self.context)
+                self._pooled = True
             # 注意：不对真实档案套 stealth——init script 会常驻这个 context，
             # 影响你之后自己开的每个标签页。附加真 Chrome 本来也不带 webdriver 标记。
             return self
 
+        self.playwright = await async_playwright().start()
         args = [
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
@@ -294,11 +347,28 @@ class StealthBrowser:
 
         return self
 
-    async def new_page(self) -> Page:
+    async def new_page(self, url_hint=None) -> Page:
         if not self.context:
             raise RuntimeError("Context 未初始化")
+        if getattr(self, "managed", False) and url_hint:
+            from urllib.parse import urlparse
+            hints = url_hint if isinstance(url_hint, (tuple, list)) else [url_hint]
+            hosts = {urlparse(hint).hostname for hint in hints}
+            for existing in self.context.pages:
+                if not existing.is_closed() and urlparse(existing.url).hostname in hosts:
+                    try:
+                        await asyncio.wait_for(existing.evaluate("1"), timeout=3)
+                    except Exception as exc:
+                        if "crash" not in str(exc).lower():
+                            raise
+                        # Only replace a crashed tab in our dedicated profile.
+                        # Reusing that page makes every following attempt fail.
+                        await existing.close()
+                        continue
+                    return existing
         page = await self.context.new_page()
-        self._own_pages.append(page)
+        if not getattr(self, "managed", False):
+            self._own_pages.append(page)
         return page
 
     async def load_cookies_from_file(self, file_path: str | Path) -> None:
@@ -374,12 +444,12 @@ class StealthBrowser:
             self._own_pages.clear()
             self.context = None
             self.browser = None
-            if self.playwright:
+            if self.playwright and not self._pooled:
                 try:
                     await self.playwright.stop()
                 except Exception:
                     pass
-                self.playwright = None
+            self.playwright = None
             return
 
         # 用户可能已手动关闭窗口，close 会抛错，逐层兜底保证清理走完

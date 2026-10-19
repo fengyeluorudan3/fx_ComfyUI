@@ -175,28 +175,33 @@ class KuaiShouUploader(BasePublisher):
             editor = page.locator("#work-description-edit")
             await editor.click(force=True)
             await page.wait_for_timeout(300)
+            await page.keyboard.press("ControlOrMeta+A")
+            await page.keyboard.press("Backspace")
 
             # 输入标题和正文
             text_content = f"{title}\n{content}\n" if content else f"{title}\n"
             await page.keyboard.insert_text(text_content)
 
-            # 输入标签 — 必须模拟键盘 Shift+3 输入 # 才能触发话题组件
+            # Keep the user's exact hashtag text. Enter selects the platform's
+            # highlighted recommendation, which may be an unrelated topic.
+            # Text preservation does not imply every hashtag is a bound topic.
             added = 0
             for tag in tags or []:
                 topic = tag.lstrip("#")
                 try:
-                    await page.keyboard.down("Shift")
-                    await page.keyboard.press("Digit3")
-                    await page.keyboard.up("Shift")
-                    await page.keyboard.insert_text(topic)
-                    await page.wait_for_timeout(300)
-                    await page.keyboard.press("Enter")
+                    await page.keyboard.insert_text(f"#{topic} ")
+                    await page.keyboard.press("Escape")
                     added += 1
                 except Exception as e:
                     self.logger.warning("标签添加失败", tag=topic, reason=str(e)[:100])
                 await page.wait_for_timeout(200)
 
-            self.logger.info("标题与标签已填充", added=added, total=len(tags or []))
+            actual = await editor.inner_text(timeout=5000)
+            expected = [title, content, *(tag.lstrip("#") for tag in tags or [])]
+            if added != len(tags or []) or any(item and item not in actual for item in expected):
+                raise RuntimeError("标题、正文或标签未完整写入快手描述框")
+            self.logger.info("标题、正文与原始标签文字已填充（不保证话题绑定）", added=added, total=len(tags or []))
+            self.metadata_warnings = ["快手保留原始标签文字；未确认全部标签已绑定为平台话题。"] if tags else []
             return True
         except Exception as e:
             self.logger.error("填写视频信息失败", reason=str(e)[:200])

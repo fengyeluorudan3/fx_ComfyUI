@@ -79,22 +79,19 @@ class BaseUploader(ABC):
         self._cdp_port 由节点层注入；为 None 时行为和以前完全一致（新开隐身浏览器）。
         """
         port = getattr(self, "_cdp_port", None)
-        autostart = getattr(self, "_cdp_autostart", True)
-        try:
-            return await StealthBrowser.create(
-                headless=headless, channel=channel,
-                cdp_port=port, cdp_autostart=autostart,
-                keep_open_seconds=self._keep_open_seconds,
-            )
-        except RuntimeError as exc:
-            if not port or not autostart or "调试端口" not in str(exc):
-                raise
-            self.logger.warning("无法复用当前 Chrome，改用可见浏览器；如无登录态请扫码登录", reason=str(exc)[:160])
-            return await StealthBrowser.create(
-                headless=False, channel=channel,
-                cdp_port=None, cdp_autostart=False,
-                keep_open_seconds=self._keep_open_seconds,
-            )
+        managed = getattr(self, "_managed_browser", False)
+        if managed:
+            from .managed_browser import ensure_publish_browser
+            from .browser import _detect_system_browser
+            port = await asyncio.to_thread(ensure_publish_browser, _detect_system_browser())
+        # Reuse means attach, never silently switch accounts in a fresh browser.
+        browser = await StealthBrowser.create(
+            headless=headless, channel=channel,
+            cdp_port=port, cdp_autostart=False,
+            keep_open_seconds=self._keep_open_seconds,
+        )
+        browser.managed = managed
+        return browser
 
     async def _should_skip_publish(self, page: Page) -> bool:
         """no_publish 模式：保存现场并返回 True，调用方直接跳过发布步骤。"""
@@ -303,7 +300,7 @@ class BaseUploader(ABC):
                         browser_id=getattr(browser, "browser_id", "unknown"),
                         headless=headless,
                     )
-                    page = await browser.new_page()
+                    page = await browser.new_page((self.login_url, self.publish_url)) if getattr(browser, "managed", False) else await browser.new_page()
                     cookie_ok = False
 
                     if getattr(browser, "attached", False):
@@ -312,6 +309,8 @@ class BaseUploader(ABC):
                         self.logger.info("附加到已有浏览器，直接用其登录态，不注入 cookie 文件")
                         cookie_ok = await self._verify_cookie_on_page(page)
                         if not cookie_ok:
+                            if getattr(browser, "managed", False):
+                                raise RuntimeError(f"{self.display_name}需要登录：已保留专用发布浏览器的登录页面。请在该窗口登录一次，随后重试；登录态自动保存，视频和文案未提交。")
                             raise RuntimeError(
                                 f"复用的浏览器里没有 {self.platform_name} 的登录态。"
                                 f"请在那个浏览器窗口里手动登录一次，再重跑本节点。"
@@ -541,7 +540,7 @@ class BaseUploader(ABC):
                         return await self._verify_cookie_on_page(page)
         except Exception as e:
             self.logger.error("verify_cookie 异常", reason=str(e)[:200])
-            return False
+            raise RuntimeError(f"浏览器登录检查未完成，不能判定为未登录：{e}") from e
 
     async def _verify_cookie_on_page(self, page: Page) -> bool:
         """在既有 page 上验证 cookie，避免验证和上传各启动一个浏览器。"""
@@ -580,7 +579,7 @@ class BaseUploader(ABC):
                 return False
         except Exception as e:
             self.logger.error("verify_cookie 异常", reason=str(e)[:200])
-            return False
+            raise RuntimeError(f"浏览器登录检查未完成，不能判定为未登录：{e}") from e
 
     # ------------------------------------------------------------- 通用工具方法
 

@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import shutil
 import tempfile
 import threading
@@ -43,34 +44,42 @@ def _browser_attrs(browser_mode, cdp_port):
     复用模式下把 cdp_port 传下去，BaseUploader._new_browser 会据此走附加模式；
     新开浏览器模式保持 None，行为与以前完全一致。
     """
+    if str(browser_mode or "").strip() == "专用发布浏览器":
+        return {"_managed_browser": True, "_cdp_port": None}
     if str(browser_mode or "").strip() == "复用我的Chrome":
-        return {"_cdp_port": int(cdp_port or 9222), "_cdp_autostart": True}
-    return {"_cdp_port": None}
+        return {"_cdp_port": int(cdp_port or 9222), "_cdp_autostart": False}
+    if str(browser_mode or "").strip() == "新开浏览器":
+        return {"_cdp_port": None}
+    raise ValueError("浏览器模式无效，请选择专用发布浏览器、复用我的Chrome或新开浏览器。")
 
 
 def _split_tags(value):
-    return [item.strip().lstrip("#") for item in str(value).split(",") if item.strip()]
+    # Accept both node comma lists and the hashtag format users paste from chat.
+    parts = re.split(r"[,，;；\n#]+", str(value or ""))
+    return list(dict.fromkeys(item.strip() for item in parts if item.strip()))
+
+
+_PUBLISH_LOCK = threading.Lock()
+_PUBLISH_LOOP = None
 
 
 def _run_async(coro):
-    result = {}
-
-    def runner():
-        loop = asyncio.new_event_loop()
-        try:
-            asyncio.set_event_loop(loop)
-            result["value"] = loop.run_until_complete(coro)
-        except BaseException as exc:
-            result["error"] = exc
-        finally:
-            loop.close()
-
-    thread = threading.Thread(target=runner, daemon=False)
-    thread.start()
-    thread.join()
-    if "error" in result:
-        raise result["error"]
-    return result.get("value")
+    global _PUBLISH_LOOP
+    # Playwright connections belong to their event loop. Keep one worker alive
+    # so all platforms reuse the user's already-authorized Chrome connection.
+    with _PUBLISH_LOCK:
+        if _PUBLISH_LOOP is None or _PUBLISH_LOOP.is_closed():
+            ready = threading.Event()
+            def runner():
+                global _PUBLISH_LOOP
+                _PUBLISH_LOOP = asyncio.new_event_loop()
+                asyncio.set_event_loop(_PUBLISH_LOOP)
+                _PUBLISH_LOOP._fx_publish_keep_cdp = True
+                ready.set()
+                _PUBLISH_LOOP.run_forever()
+            threading.Thread(target=runner, name="fx-publish", daemon=True).start()
+            ready.wait()
+        return asyncio.run_coroutine_threadsafe(coro, _PUBLISH_LOOP).result()
 
 
 def _path_from_comfy_file(value):
@@ -184,6 +193,12 @@ def _save_video_to_temp(video, temp_paths):
         if saved:
             return saved
 
+    # A file-backed VIDEO is already an uploadable artifact. Reusing its path
+    # avoids copying multi-GB long videos once for each publishing platform.
+    path = _path_from_comfy_file(video)
+    if path and Path(path).expanduser().is_file():
+        return str(Path(path).expanduser().resolve())
+
     save_to = getattr(video, "save_to", None)
     if callable(save_to):
         fd, temp_path = tempfile.mkstemp(prefix="fx_publish_video_", suffix=".mp4")
@@ -221,18 +236,23 @@ def _extract_video_from_file_source(video):
 
 def _save_raw_video_source(source, temp_paths):
     if isinstance(source, (str, Path)):
-        copied = _copy_to_temp_file(source, "fx_publish_video_", ".mp4")
-        if copied:
-            temp_paths.append(Path(copied))
-            return copied
+        path = Path(source).expanduser()
+        if path.is_file():
+            return str(path.resolve())
         return ""
     if isinstance(source, io.BytesIO):
         fd, temp_path = tempfile.mkstemp(prefix="fx_publish_video_", suffix=".mp4")
         os.close(fd)
-        source.seek(0)
-        with open(temp_path, "wb") as f:
-            shutil.copyfileobj(source, f)
-        source.seek(0)
+        position = source.tell()
+        try:
+            source.seek(0)
+            with open(temp_path, "wb") as f:
+                shutil.copyfileobj(source, f)
+        except Exception:
+            Path(temp_path).unlink(missing_ok=True)
+            raise
+        finally:
+            source.seek(position)
         if Path(temp_path).stat().st_size > 0:
             temp_paths.append(Path(temp_path))
             return temp_path
@@ -281,14 +301,24 @@ async def _publish_async(platform, video, video_path, title, content, tags, cove
     temp_paths = []
     uploader = None
     try:
+        if no_publish not in ("yes", "no"):
+            raise ValueError("no_publish 必须明确为 yes（试填）或 no（投稿），本次未执行。")
+        if not str(title or "").strip() and not str(content or "").strip():
+            raise ValueError("标题和文案均为空：请先根据视频内容填写发布文案，再开始上传。")
         resolved_video = _choose_path(video_path, video, temp_paths)
         video_file = Path(str(resolved_video)).expanduser()
         if not video_file.is_file():
             raise ValueError(f"视频文件不存在: {video_file}")
+        if video_file.stat().st_size == 0:
+            raise ValueError("视频文件为空，请先完成视频导出。")
 
         resolved_cover = _choose_path(cover_path, cover, temp_paths, is_image=True)
-        if resolved_cover and not Path(resolved_cover).expanduser().is_file():
-            raise ValueError(f"封面文件不存在: {resolved_cover}")
+        if resolved_cover:
+            cover_file = Path(resolved_cover).expanduser()
+            if not cover_file.is_file():
+                raise ValueError(f"封面文件不存在: {resolved_cover}")
+            if cover_file.stat().st_size == 0:
+                raise ValueError("封面文件为空，请重新选择封面。")
 
         cookie_path = str(cookies_path).strip() or None
         uploader = _get_uploader_cls(platform)(
@@ -316,6 +346,7 @@ async def _publish_async(platform, video, video_path, title, content, tags, cove
             "status": "preview_ready" if no_publish == "yes" else "success",
             "run_id": uploader.run_id,
             "debug_dir": str(uploader.debug_dir),
+            "warnings": list(getattr(uploader, "metadata_warnings", [])),
         }
     except Exception as exc:
         if uploader is not None:
@@ -349,6 +380,8 @@ def _publish(platform, video, video_path, title, content, tags, cover, cover_pat
         uploader_attrs=uploader_attrs,
     ))
     receipt = {"platform": platform, "status": result["status"], "run_id": result["run_id"], "debug_dir": result["debug_dir"]}
+    if result.get("warnings"):
+        receipt["warnings"] = result["warnings"]
     return {"ui": {"text": [json.dumps(receipt, ensure_ascii=False)]},
             "result": (result["status"], result["run_id"], result["debug_dir"])}
 
@@ -364,17 +397,18 @@ class _BasePublishNode:
                 "content": ("STRING", {"default": "", "multiline": True, "dynamicPrompts": False}),
                 "tags": ("STRING", {"default": "", "multiline": False}),
                 "browser_mode": (
-                    ["复用我的Chrome", "新开浏览器"],
+                    ["专用发布浏览器", "复用我的Chrome", "新开浏览器"],
                     {
-                        "default": "复用我的Chrome",
-                        "tooltip": "复用我的Chrome=附加到你已开着的浏览器，直接用里面现成的登录态，"
-                                   "不再新开窗口、不用扫码。前提是 Chrome 以调试端口启动过；"
-                                   "没开且 Chrome 当前没运行时会自动带端口拉起。",
+                        "default": "专用发布浏览器",
+                        "tooltip": "推荐专用发布浏览器：自动启动连接，首次登录后固定保存账号状态。"
+                                   "复用我的Chrome：连接已开放调试端口的日常 Chrome。"
+                                   "普通 Chrome 已登录但未开放调试端口时会提示连接问题；"
+                                   "新开浏览器模式需要在发布浏览器中登录一次，后续复用保存的登录态。",
                     },
                 ),
                 "headed": (["yes", "no"], {"default": "yes"}),
                 "keep_open_seconds": ("INT", {"default": 0, "min": 0, "max": 3600}),
-                "no_publish": (["no", "yes"], {"default": "no"}),
+                "no_publish": (["no", "yes"], {"default": "yes"}),
             },
             "optional": {
                 "cdp_port": ("INT", {"default": 9222, "min": 1024, "max": 65535,
@@ -392,6 +426,11 @@ class _BasePublishNode:
     FUNCTION = "run"
     CATEGORY = "FX Publish"
     OUTPUT_NODE = True
+
+    @classmethod
+    def IS_CHANGED(cls, **kwargs):
+        # A previous browser receipt cannot establish the current upload state.
+        return float("nan")
 
     def run(self, title, content, tags, browser_mode, headed, keep_open_seconds,
             no_publish, cdp_port=9222, video=None, video_path="", cover=None,

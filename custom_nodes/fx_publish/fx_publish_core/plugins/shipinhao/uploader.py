@@ -308,6 +308,8 @@ class ShiPinHaoUploader(BasePublisher):
                 rect["x"] + rect["w"] / 2, rect["y"] + min(rect["h"] / 2, 40)
             )
             await page.wait_for_timeout(600)
+            await page.keyboard.press("ControlOrMeta+A")
+            await page.keyboard.press("Backspace")
 
             # 输入标题 (insert_text 比 type 更快更可靠)
             await page.keyboard.insert_text(title)
@@ -338,9 +340,10 @@ class ShiPinHaoUploader(BasePublisher):
 })()
 """,
             ) or ""
-            title_ok = not title or title[:10] in actual
-            content_ok = not content or content[:10] in actual
-            if not title_ok or not content_ok:
+            title_ok = not title or title in actual
+            content_ok = not content or content in actual
+            tags_ok = all(tag.lstrip("#") in actual for tag in tags or [])
+            if not title_ok or not content_ok or not tags_ok:
                 self.logger.error(
                     "填充校验失败：编辑器内容与预期不符",
                     title_ok=title_ok,

@@ -87,11 +87,10 @@ ASTRALMIND_API_BASE_URL = (
     or "https://api.astralmindai.com"
 ).rstrip("/")
 
-# Oydn 网关（fx_gateway）对外 base URL，fxllm 插件的 oydn provider 统一引用
-ASTRALMIND_OYDN_BASE_URL = (
-    os.environ.get("ASTRALMIND_OYDN_BASE_URL")
+# Gate 网关（fx_gateway）对外 base URL，fxllm 插件的 gate provider 统一引用
+ASTRALMIND_GATE_BASE_URL = (
+    os.environ.get("ASTRALMIND_GATE_BASE_URL")
     or "https://api-gate.astralmindai.com"
-    # or "https://api-oydn-preview.aisphereoa.com"
 ).rstrip("/")
 
 async def send_socket_catch_exception(function, message):

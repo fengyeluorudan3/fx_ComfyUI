@@ -90,15 +90,7 @@ class DouYinUploader(BasePublisher):
                     "set_thumbnail",
                     lambda: self._set_thumbnail(page, thumbnail_path),
                     retries=1,
-                    required=False,
-                )
-
-                await self._stable_step(
-                    page,
-                    "set_third_party_platforms",
-                    lambda: self._set_third_party_platforms(page),
-                    retries=1,
-                    required=False,
+                    required=bool(thumbnail_path),
                 )
 
                 if publish_date:
@@ -114,7 +106,11 @@ class DouYinUploader(BasePublisher):
                     "handle_auto_video_cover",
                     lambda: self._handle_auto_video_cover(page),
                     retries=1,
-                    required=False,
+                )
+
+                await self._stable_step(
+                    page, "wait_for_publish_ready",
+                    lambda: self._wait_for_publish_ready(page), retries=0,
                 )
 
                 if await self._should_skip_publish(page):
@@ -155,14 +151,17 @@ class DouYinUploader(BasePublisher):
         """
 
         async def check() -> bool:
+            body_text = await page.locator("body").inner_text(timeout=5000)
+            if any(value in body_text for value in ("文件解析中", "取消上传", "预览转码中", "视频处理中")):
+                return False
             for txt in ["上传失败", "处理失败", "视频格式不支持"]:
                 if await page.locator(f"text={txt}").count() > 0:
                     raise RuntimeError(txt)
 
-            # 明确完成文案（暂态 toast，逮到就赢）
-            for txt in ["上传成功", "已上传", "处理完成"]:
-                if await page.locator(f"text={txt}").count() > 0:
-                    return True
+            # Editing controls also exist while no file is selected. Require
+            # an actual video source, rather than the enabled publish button.
+            if not await self._has_video_preview(page):
+                return False
 
             state = await page.evaluate(
                 """() => {
@@ -197,6 +196,11 @@ class DouYinUploader(BasePublisher):
             check, timeout=180.0, interval=1.5, desc="upload_complete"
         )
 
+    async def _has_video_preview(self, page: Page) -> bool:
+        return await page.evaluate("""() => Array.from(document.querySelectorAll('video')).some(v =>
+            Boolean(v.currentSrc || v.getAttribute('src') || v.querySelector('source[src]'))
+            && !v.error)""")
+
     async def _fill_video_info(
         self,
         page: Page,
@@ -225,13 +229,15 @@ class DouYinUploader(BasePublisher):
             desc_filled = await self._fill_description(page, desc_text)
 
             await page.wait_for_timeout(500)
+            await page.keyboard.press("Escape")
+            await page.get_by_text("基础信息", exact=True).click(timeout=3000)
             # 标题在 <input>/<textarea> 里，值不出现在 body.inner_text，
             # 需要读控件自身的值；正文/标签在 contenteditable 区域，用 inner_text 校验。
             title_ok = not title_text or await self._verify_title_filled(page, title_text)
             if not title_ok:
                 raise RuntimeError("标题填写后未在输入框检测到标题文本")
-            page_text = await page.locator("body").inner_text(timeout=5000)
-            if desc_text and not any(part in page_text for part in desc_parts if part):
+            description_text = await self._read_description(page)
+            if desc_text and " ".join(desc_text.split()) != " ".join(description_text.split()):
                 raise RuntimeError("简介/标签填写后页面未检测到对应文本")
 
             self.logger.info(
@@ -287,16 +293,6 @@ class DouYinUploader(BasePublisher):
                     continue
             if not clicked:
                 break
-        try:
-            await page.evaluate("""
-() => {
-  document.querySelectorAll(
-    '.shepherd-element, .shepherd-modal-overlay-container, .semi-popover-wrapper, .douyin-creator-pc-master__wrap'
-  ).forEach((el) => el.remove());
-}
-""")
-        except Exception:
-            pass
 
     async def _wait_for_metadata_area(self, page: Page, timeout: int = 15000) -> bool:
         selectors = [
@@ -352,6 +348,20 @@ class DouYinUploader(BasePublisher):
             return True
         raise RuntimeError("未找到标题输入区域")
 
+    async def _read_description(self, page: Page) -> str:
+        for selector in ("textarea[placeholder*='作品简介']", "textarea[placeholder*='简介']", ".zone-container"):
+            loc = page.locator(selector).first
+            if await loc.count() > 0 and await loc.is_visible():
+                if selector.startswith("textarea"):
+                    return await loc.input_value(timeout=2000)
+                return await loc.evaluate("""el => {
+                    const lines = Array.from(el.querySelectorAll('[data-line-wrapper]'));
+                    if (!lines.length) return el.innerText || '';
+                    return lines.map(line => Array.from(line.querySelectorAll('[data-string]:not([data-enter])'))
+                        .map(part => part.textContent || '').join('')).join('\\n');
+                }""")
+        return await page.locator("[contenteditable='true']").nth(1).inner_text(timeout=2000)
+
     async def _fill_description(self, page: Page, text: str) -> bool:
         if not text:
             return True
@@ -366,6 +376,7 @@ class DouYinUploader(BasePublisher):
                 try:
                     await loc.fill(text)
                 except Exception:
+                    await page.keyboard.press("ControlOrMeta+A")
                     await page.keyboard.insert_text(text)
                 await page.wait_for_timeout(300)
                 return True
@@ -380,6 +391,7 @@ class DouYinUploader(BasePublisher):
         editable = page.locator("[contenteditable='true']").nth(1)
         if await editable.count() > 0 and await editable.is_visible():
             await editable.click(force=True)
+            await page.keyboard.press("ControlOrMeta+A")
             await page.keyboard.insert_text(text)
             await page.wait_for_timeout(300)
             return True
@@ -437,7 +449,7 @@ class DouYinUploader(BasePublisher):
             if not opened:
                 await self._capture_step_snapshot(page, "set_thumbnail", "modal_not_open")
                 self.logger.warning("封面弹窗未出现，跳过")
-                return True
+                return False
             await page.wait_for_timeout(1000)
 
             # 3) 弹窗内上传自定义封面图片（image input 是 .semi-upload-hidden-input）
@@ -482,7 +494,7 @@ class DouYinUploader(BasePublisher):
             return True
         except Exception as e:
             self.logger.error("封面设置失败", reason=str(e)[:200])
-            return True  # 封面失败不影响发布
+            return False
 
     async def _dismiss_horizontal_cover_hint(self, page: Page) -> bool:
         """关闭"设置横封面获得更多流量"提示弹窗，返回是否点到了。"""
@@ -544,14 +556,17 @@ class DouYinUploader(BasePublisher):
     async def _handle_auto_video_cover(self, page: Page) -> bool:
         """处理必须设置封面的情况：选择推荐封面并确认。"""
         try:
-            if not await page.get_by_text("请设置封面后再发布").first.is_visible():
+            body = await page.locator("body").inner_text(timeout=5000)
+            if not any(message in body for message in ("请设置封面后再发布", "横/竖双封面缺失", "请设置封面")):
                 return True
 
+            await page.get_by_text("基础信息", exact=True).click(timeout=3000)
             recommend_cover = page.locator('[class^="recommendCover-"]').first
             if await recommend_cover.count() == 0:
-                return True
+                self.last_error = "抖音要求设置封面，但未找到可用推荐封面，请指定封面图片。"
+                return False
 
-            await recommend_cover.click()
+            await recommend_cover.click(timeout=5000)
             await page.wait_for_timeout(500)
 
             # 确认弹窗
@@ -562,6 +577,53 @@ class DouYinUploader(BasePublisher):
         except Exception as e:
             self.logger.error("自动封面设置失败", reason=str(e)[:200])
             return False
+
+    async def _wait_for_publish_ready(self, page: Page) -> bool:
+        """A completed upload toast alone does not mean the preview is ready."""
+        blocked = []
+        interrupted = []
+        last_progress = [0.0]
+        video_tab_selected = [False]
+        async def check():
+            url = str(getattr(page, "url", ""))
+            if url and "/content/post/video" not in url:
+                interrupted.append("抖音发布编辑页已离开，试填已中断；无法确认是否有手动投稿，请先核对平台记录，勿自动重新上传。")
+                return True
+            text = await page.locator("body").inner_text(timeout=5000)
+            now = time.monotonic()
+            if now - last_progress[0] >= 30:
+                pending = [value for value in ("请设置封面后再发布", "横/竖双封面缺失", "请设置封面", "文件解析中", "取消上传", "预览转码中", "视频处理中", "封面设置中") if value in text]
+                self.logger.info("等待发布预览就绪", pending="、".join(pending) or "检查视频预览和发布按钮", timeout_seconds=180)
+                if last_progress[0] == 0:
+                    await self._capture_step_snapshot(page, "publish_ready", "waiting")
+                last_progress[0] = now
+            if any(value in text for value in ("请设置封面后再发布", "横/竖双封面缺失", "请设置封面")):
+                blocked.append("抖音封面尚未设置完成，不能报告试填成功")
+                return False
+            if any(value in text for value in ("文件解析中", "取消上传", "预览转码中", "视频处理中", "封面设置中")):
+                return False
+            if not await self._has_video_preview(page):
+                # Selecting a recommended cover switches Douyin to the cover
+                # preview tab, which unmounts the video element.
+                if not video_tab_selected[0]:
+                    tab = page.get_by_text("预览视频", exact=True)
+                    if await tab.count() and await tab.first.is_visible():
+                        await tab.first.click(timeout=3000)
+                        video_tab_selected[0] = True
+                        self.logger.info("已切回视频预览，继续校验上传结果")
+                return False
+            button = await self._find_main_publish_button(page)
+            return button is not None and await button.is_enabled()
+        ready = await self._wait_for_condition(check, timeout=180, interval=1.5, desc="publish_ready")
+        if interrupted:
+            self.last_error = interrupted[0]
+            return False
+        if blocked and not ready:
+            self.last_error = blocked[0]
+            return False
+        if not ready:
+            self.last_error = "抖音仍在处理视频，尚未达到可发布状态。"
+        return ready
 
     async def _set_location(self, page: Page, location: str) -> bool:
         """
