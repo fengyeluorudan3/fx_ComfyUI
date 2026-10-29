@@ -109,6 +109,15 @@ async def request_log_middleware(request: web.Request, handler):
 
     global ASTRALMIND_TOKEN, ASTRALMIND_USER_ID, ASTRALMIND_TOKEN_STATUS, ASTRALMIND_TOKEN_LAST_CHECK
 
+    # Cloud runtimes are private executors. A user agent or desktop header is not authentication.
+    cloud_secret = os.getenv("CANVAS_GATEWAY_SECRET", "")
+    if os.getenv("CANVAS_CLOUD_RUNTIME", "0") == "1":
+        import hmac
+        supplied = request.headers.get("X-Canvas-Gateway-Secret", "")
+        if not cloud_secret or not hmac.compare_digest(cloud_secret, supplied):
+            return web.json_response({"message": "Runtime authentication required"}, status=403)
+        return await handler(request)
+
     # 0. 对启动器 / ComfyUI 内部通信直接放行，不做桌面/网页校验
     #    这些请求来自 launcher(python-requests) 或 ComfyUI 自身，不是用户行为
     _internal_prefixes = (
