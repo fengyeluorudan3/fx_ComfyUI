@@ -13,15 +13,9 @@ from torchvision import transforms
 
 import comfy.patcher_extension
 from comfy.ldm.modules.attention import optimized_attention
-
-def apply_rotary_pos_emb(
-    t: torch.Tensor,
-    freqs: torch.Tensor,
-) -> torch.Tensor:
-    t_ = t.reshape(*t.shape[:-1], 2, -1).movedim(-2, -1).unsqueeze(-2).float()
-    t_out = freqs[..., 0] * t_[..., 0] + freqs[..., 1] * t_[..., 1]
-    t_out = t_out.movedim(-1, -2).reshape(*t.shape).type_as(t)
-    return t_out
+import comfy.ldm.common_dit
+import comfy.ops
+import comfy.quant_ops
 
 
 # ---------------------- Feed Forward Network -----------------------
@@ -155,11 +149,29 @@ class Attention(nn.Module):
         x: torch.Tensor,
         context: Optional[torch.Tensor] = None,
         rope_emb: Optional[torch.Tensor] = None,
+        transformer_options: Optional[dict] = {},
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        q = self.q_proj(x)
         context = x if context is None else context
-        k = self.k_proj(context)
-        v = self.v_proj(context)
+        q_input = x
+        k_input = context
+        v_input = context
+
+        transformer_patches = transformer_options.get("patches", {})
+        patch_name = "attn1_patch" if self.is_selfattn else "attn2_patch"
+        if patch_name in transformer_patches:
+            extra_options = transformer_options.copy()
+            extra_options["n_heads"] = self.n_heads
+            extra_options["dim_head"] = self.head_dim
+            for patch in transformer_patches[patch_name]:
+                out = patch(q_input, k_input, v_input, pe=rope_emb, attn_mask=None, extra_options=extra_options)
+                q_input = out.get("q", q_input)
+                k_input = out.get("k", k_input)
+                v_input = out.get("v", v_input)
+                rope_emb = out.get("pe", rope_emb)
+
+        q = self.q_proj(q_input)
+        k = self.k_proj(k_input)
+        v = self.v_proj(v_input)
         q, k, v = map(
             lambda t: rearrange(t, "b ... (h d) -> b ... h d", h=self.n_heads, d=self.head_dim),
             (q, k, v),
@@ -168,12 +180,16 @@ class Attention(nn.Module):
         def apply_norm_and_rotary_pos_emb(
             q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, rope_emb: Optional[torch.Tensor]
         ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            q = self.q_norm(q)
-            k = self.k_norm(k)
             v = self.v_norm(v)
             if self.is_selfattn and rope_emb is not None:  # only apply to self-attention!
-                q = apply_rotary_pos_emb(q, rope_emb)
-                k = apply_rotary_pos_emb(k, rope_emb)
+                q_scale, _, q_offload_stream = comfy.ops.cast_bias_weight(self.q_norm, q, offloadable=True)
+                k_scale, _, k_offload_stream = comfy.ops.cast_bias_weight(self.k_norm, k, offloadable=True)
+                q, k = comfy.quant_ops.ck.rms_rope_split_half(q, k, rope_emb, q_scale, k_scale, self.q_norm.eps)
+                comfy.ops.uncast_bias_weight(self.q_norm, q_scale, None, q_offload_stream)
+                comfy.ops.uncast_bias_weight(self.k_norm, k_scale, None, k_offload_stream)
+            else:
+                q = self.q_norm(q)
+                k = self.k_norm(k)
             return q, k, v
 
         q, k, v = apply_norm_and_rotary_pos_emb(q, k, v, rope_emb)
@@ -196,7 +212,7 @@ class Attention(nn.Module):
             x (Tensor): The query tensor of shape [B, Mq, K]
             context (Optional[Tensor]): The key tensor of shape [B, Mk, K] or use x as context [self attention] if None
         """
-        q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb)
+        q, k, v = self.compute_qkv(x, context, rope_emb=rope_emb, transformer_options=transformer_options)
         return self.compute_attention(q, k, v, transformer_options=transformer_options)
 
 
@@ -334,7 +350,7 @@ class FinalLayer(nn.Module):
         device=None, dtype=None, operations=None
     ):
         super().__init__()
-        self.layer_norm = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
+        self.layer_norm = operations.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.linear = operations.Linear(
             hidden_size, spatial_patch_size * spatial_patch_size * temporal_patch_size * out_channels, bias=False, device=device, dtype=dtype
         )
@@ -462,6 +478,8 @@ class Block(nn.Module):
         extra_per_block_pos_emb: Optional[torch.Tensor] = None,
         transformer_options: Optional[dict] = {},
     ) -> torch.Tensor:
+        residual_dtype = x_B_T_H_W_D.dtype
+        compute_dtype = emb_B_T_D.dtype
         if extra_per_block_pos_emb is not None:
             x_B_T_H_W_D = x_B_T_H_W_D + extra_per_block_pos_emb
 
@@ -511,7 +529,7 @@ class Block(nn.Module):
         result_B_T_H_W_D = rearrange(
             self.self_attn(
                 # normalized_x_B_T_HW_D,
-                rearrange(normalized_x_B_T_H_W_D, "b t h w d -> b (t h w) d"),
+                rearrange(normalized_x_B_T_H_W_D.to(compute_dtype), "b t h w d -> b (t h w) d"),
                 None,
                 rope_emb=rope_emb_L_1_1_D,
                 transformer_options=transformer_options,
@@ -521,7 +539,7 @@ class Block(nn.Module):
             h=H,
             w=W,
         )
-        x_B_T_H_W_D = x_B_T_H_W_D + gate_self_attn_B_T_1_1_D * result_B_T_H_W_D
+        x_B_T_H_W_D = torch.addcmul(x_B_T_H_W_D, gate_self_attn_B_T_1_1_D.to(residual_dtype), result_B_T_H_W_D.to(residual_dtype))
 
         def _x_fn(
             _x_B_T_H_W_D: torch.Tensor,
@@ -535,7 +553,7 @@ class Block(nn.Module):
             )
             _result_B_T_H_W_D = rearrange(
                 self.cross_attn(
-                    rearrange(_normalized_x_B_T_H_W_D, "b t h w d -> b (t h w) d"),
+                    rearrange(_normalized_x_B_T_H_W_D.to(compute_dtype), "b t h w d -> b (t h w) d"),
                     crossattn_emb,
                     rope_emb=rope_emb_L_1_1_D,
                     transformer_options=transformer_options,
@@ -554,16 +572,22 @@ class Block(nn.Module):
             shift_cross_attn_B_T_1_1_D,
             transformer_options=transformer_options,
         )
-        x_B_T_H_W_D = result_B_T_H_W_D * gate_cross_attn_B_T_1_1_D + x_B_T_H_W_D
+        x_B_T_H_W_D = torch.addcmul(x_B_T_H_W_D, gate_cross_attn_B_T_1_1_D.to(residual_dtype), result_B_T_H_W_D.to(residual_dtype))
 
         normalized_x_B_T_H_W_D = _fn(
             x_B_T_H_W_D,
             self.layer_norm_mlp,
             scale_mlp_B_T_1_1_D,
             shift_mlp_B_T_1_1_D,
-        )
+        ).to(compute_dtype)
+        patches = transformer_options.get("patches", {})
+        if "mlp_patch" in patches:
+            args = {"x": normalized_x_B_T_H_W_D, "transformer_options": transformer_options}
+            for patch in patches["mlp_patch"]:
+                args = patch(args)
+            normalized_x_B_T_H_W_D = args["x"]
         result_B_T_H_W_D = self.mlp(normalized_x_B_T_H_W_D)
-        x_B_T_H_W_D = x_B_T_H_W_D + gate_mlp_B_T_1_1_D * result_B_T_H_W_D
+        x_B_T_H_W_D = torch.addcmul(x_B_T_H_W_D, gate_mlp_B_T_1_1_D.to(residual_dtype), result_B_T_H_W_D.to(residual_dtype))
         return x_B_T_H_W_D
 
 
@@ -835,6 +859,8 @@ class MiniTrainDIT(nn.Module):
         padding_mask: Optional[torch.Tensor] = None,
         **kwargs,
     ):
+        orig_shape = list(x.shape)
+        x = comfy.ldm.common_dit.pad_to_patch_size(x, (self.patch_temporal, self.patch_spatial, self.patch_spatial))
         x_B_C_T_H_W = x
         timesteps_B_T = timesteps
         crossattn_emb = context
@@ -867,13 +893,33 @@ class MiniTrainDIT(nn.Module):
                 x_B_T_H_W_D.shape == extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D.shape
             ), f"{x_B_T_H_W_D.shape} != {extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D.shape}"
 
+        transformer_options = kwargs.get("transformer_options", {})
+        patches = transformer_options.get("patches", {})
+        if "post_input" in patches:
+            transformer_options = transformer_options.copy()
+            transformer_options["model_patch_data"] = {}
+
+        if "post_input" in patches:
+            for patch in patches["post_input"]:
+                out = patch({"img": x_B_T_H_W_D, "x": x_B_C_T_H_W, "transformer_options": transformer_options})
+                x_B_T_H_W_D = out["img"]
+
         block_kwargs = {
             "rope_emb_L_1_1_D": rope_emb_L_1_1_D.unsqueeze(1).unsqueeze(0),
             "adaln_lora_B_T_3D": adaln_lora_B_T_3D,
             "extra_per_block_pos_emb": extra_pos_emb_B_T_H_W_D_or_T_H_W_B_D,
-            "transformer_options": kwargs.get("transformer_options", {}),
+            "transformer_options": transformer_options,
         }
-        for block in self.blocks:
+
+        # The residual stream for this model has large values. To make fp16 compute_dtype work, we keep the residual stream
+        # in fp32, but run attention and MLP modules in fp16.
+        # An alternate method that clamps fp16 values "works" in the sense that it makes coherent images, but there is noticeable
+        # quality degradation and visual artifacts.
+        if x_B_T_H_W_D.dtype == torch.float16:
+            x_B_T_H_W_D = x_B_T_H_W_D.float()
+
+        for block_index, block in enumerate(self.blocks):
+            transformer_options["block_index"] = block_index
             x_B_T_H_W_D = block(
                 x_B_T_H_W_D,
                 t_embedding_B_T_D,
@@ -881,6 +927,6 @@ class MiniTrainDIT(nn.Module):
                 **block_kwargs,
             )
 
-        x_B_T_H_W_O = self.final_layer(x_B_T_H_W_D, t_embedding_B_T_D, adaln_lora_B_T_3D=adaln_lora_B_T_3D)
-        x_B_C_Tt_Hp_Wp = self.unpatchify(x_B_T_H_W_O)
+        x_B_T_H_W_O = self.final_layer(x_B_T_H_W_D.to(crossattn_emb.dtype), t_embedding_B_T_D, adaln_lora_B_T_3D=adaln_lora_B_T_3D)
+        x_B_C_Tt_Hp_Wp = self.unpatchify(x_B_T_H_W_O)[:, :, :orig_shape[-3], :orig_shape[-2], :orig_shape[-1]]
         return x_B_C_Tt_Hp_Wp

@@ -1,0 +1,7 @@
+{
+  "story_brief":"A quiet luxury perfume object emerges from darkness through controlled light, glass, amber liquid, and reflection.",
+  "visual_style":{"name":"Minimal Amber Glass Luxury","description":"Physically honest premium product cinematography with diffused upper-left light, clear glass, warm amber liquid, glossy black cap, dark reflective tabletop, and seamless gradient."},
+  "subject_list":[],
+  "scene_list":[],
+  "other_list":[{"asset_id":"perf_silky_001","asset_type":"user_uploaded_product_reference","source":"user_upload","canvas_node_id":"103","local_path":"input/ComfyUI_00571_.png","status":"locked","lock_reason":"Uploaded product/hero image is authoritative; do not regenerate the same product."}]
+}

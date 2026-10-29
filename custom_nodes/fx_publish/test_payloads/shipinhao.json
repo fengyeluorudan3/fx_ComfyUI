@@ -1,0 +1,11 @@
+{
+  "platform": "shipinhao",
+  "video_path": "/绝对路径/你的视频.mp4",
+  "cover_path": "/绝对路径/你的封面.png",
+  "title": "测试标题",
+  "content": "测试正文内容",
+  "tags": ["标签1", "标签2"],
+  "headed": true,
+  "keep_open_seconds": 0,
+  "no_publish": true
+}

@@ -1,0 +1,23 @@
+# fx_crawler 依赖（移植自 MediaCrawler）
+httpx>=0.28.1
+# 视频下载节点（video_nodes.py）。各平台接口变动频繁，下载失败先升级 yt-dlp
+yt-dlp>=2025.1.15
+imageio-ffmpeg>=0.5.1  # 系统没装 ffmpeg 时的兜底二进制（B站等分轨必须合流）
+playwright>=1.55.0
+tenacity>=9.0.0
+aiofiles>=24.1.0
+aiosqlite>=0.20.0
+parsel>=1.10.0
+pydantic>=2.10.0
+PyExecJS>=1.5.1
+pyhumps>=3.8.0
+sqlalchemy>=2.0.0
+xhshow>=0.1.9,<0.2.0  # 0.2.0 改了 build_payload_array 签名(加 hex_md5_path),与签名代码/ monkey-patch 不兼容
+# 可选功能（词云/多种存储后端）
+redis>=6.4.0
+pandas>=2.3.3
+wordcloud>=1.9.4
+jieba>=0.42.1
+aiomysql>=0.2.0
+asyncpg>=0.30.0
+motor>=3.0.0

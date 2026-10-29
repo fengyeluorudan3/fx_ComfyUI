@@ -5,13 +5,26 @@ __pycache__/
 !/input/example.png
 /models/
 /temp/
-/custom_nodes/
-!custom_nodes/example_node.py.example
+/ui-optimize/
+/appold/
+# Ignore all under custom_nodes （只保留 example_node 示例）
+custom_nodes/*
+!custom_nodes/ComfyUI-Custom-Scripts
+!custom_nodes/ComfyUI-Custom-Scripts/
+!custom_nodes/ComfyUI-Custom-Scripts/**
+!custom_nodes/ComfyUI-Easy-Use/
+!custom_nodes/ComfyUI-Easy-Use/**
+!custom_nodes/fx_crawler/
+!custom_nodes/fx_crawler/**
+!custom_nodes/fx_publish/
+!custom_nodes/fx_publish/**
+# 原独立仓库的 git 目录改名保留，不入库
+.git.local/
 extra_model_paths.yaml
 /.vs
 .vscode/
 .idea/
-venv/
+venv*/
 .venv/
 /web/extensions/*
 !/web/extensions/logging.js.example
@@ -19,8 +32,9 @@ venv/
 /tests-ui/data/object_info.json
 /user/
 *.log
+/logs/
 web_custom_versions/
 .DS_Store
-openapi.yaml
 filtered-openapi.yaml
 uv.lock
+.comfy_environment

@@ -8,7 +8,7 @@ from einops import rearrange
 
 from comfy.ldm.modules.attention import optimized_attention
 from comfy.ldm.flux.layers import EmbedND
-from comfy.ldm.flux.math import apply_rope1
+from comfy.ldm.flux.math import apply_rope1, rope
 import comfy.ldm.common_dit
 import comfy.model_management
 import comfy.patcher_extension
@@ -62,6 +62,8 @@ class WanSelfAttention(nn.Module):
             x(Tensor): Shape [B, L, num_heads, C / num_heads]
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
         """
+        patches = transformer_options.get("patches", {})
+
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
         def qkv_fn_q(x):
@@ -85,6 +87,10 @@ class WanSelfAttention(nn.Module):
             heads=self.num_heads,
             transformer_options=transformer_options,
         )
+
+        if "attn1_patch" in patches:
+            for p in patches["attn1_patch"]:
+                x = p({"x": x, "q": q, "k": k, "transformer_options": transformer_options})
 
         x = self.o(x)
         return x
@@ -225,6 +231,8 @@ class WanAttentionBlock(nn.Module):
         """
         # assert e.dtype == torch.float32
 
+        patches = transformer_options.get("patches", {})
+
         if e.ndim < 4:
             e = (comfy.model_management.cast_to(self.modulation, dtype=x.dtype, device=x.device) + e).chunk(6, dim=1)
         else:
@@ -232,6 +240,7 @@ class WanAttentionBlock(nn.Module):
         # assert e[0].dtype == torch.float32
 
         # self-attention
+        x = x.contiguous() # otherwise implicit in LayerNorm
         y = self.self_attn(
             torch.addcmul(repeat_e(e[0], x), self.norm1(x), 1 + repeat_e(e[1], x)),
             freqs, transformer_options=transformer_options)
@@ -241,6 +250,11 @@ class WanAttentionBlock(nn.Module):
 
         # cross-attention & ffn
         x = x + self.cross_attn(self.norm3(x), context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+        if "attn2_patch" in patches:
+            for p in patches["attn2_patch"]:
+                x = p({"x": x, "transformer_options": transformer_options})
+
         y = self.ffn(torch.addcmul(repeat_e(e[3], x), self.norm2(x), 1 + repeat_e(e[4], x)))
         x = torch.addcmul(x, y, repeat_e(e[5], x))
         return x
@@ -487,7 +501,7 @@ class WanModel(torch.nn.Module):
         self.blocks = nn.ModuleList([
             wan_attn_block_class(cross_attn_type, dim, ffn_dim, num_heads,
                                  window_size, qk_norm, cross_attn_norm, eps, operation_settings=operation_settings)
-            for _ in range(num_layers)
+            for i in range(num_layers)
         ])
 
         # head
@@ -538,8 +552,10 @@ class WanModel(torch.nn.Module):
                 List of denoised video tensors with original input shapes [C_out, F, H / 8, W / 8]
         """
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
+        transformer_options["grid_sizes"] = grid_sizes
         x = x.flatten(2).transpose(1, 2)
 
         # time embeddings
@@ -549,11 +565,21 @@ class WanModel(torch.nn.Module):
         e0 = self.time_projection(e).unflatten(2, (6, self.dim))
 
         full_ref = None
+        img_offset = 0
         if self.ref_conv is not None:
             full_ref = kwargs.get("reference_latent", None)
             if full_ref is not None:
                 full_ref = self.ref_conv(full_ref).flatten(2).transpose(1, 2)
                 x = torch.concat((full_ref, x), dim=1)
+                img_offset = full_ref.shape[1]
+
+        # In-context reference (Bernini)
+        context_latents = kwargs.get("context_latents", None)
+        main_len = x.shape[1]
+        if context_latents is not None:
+            for lat in context_latents:
+                cl = self.patch_embedding(lat.float().to(x.device)).to(x.dtype).flatten(2).transpose(1, 2)
+                x = torch.cat([x, cl], dim=1)
 
         # context
         context = self.text_embedding(context)
@@ -566,8 +592,12 @@ class WanModel(torch.nn.Module):
             context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
+        transformer_options["total_blocks"] = len(self.blocks)
+        transformer_options["block_type"] = "double"
         for i, block in enumerate(self.blocks):
+            transformer_options["block_index"] = i
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args):
                     out = {}
@@ -578,8 +608,16 @@ class WanModel(torch.nn.Module):
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
 
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": img_offset, "transformer_options": transformer_options})
+                    x = out["img"]
+
         # head
         x = self.head(x, e)
+
+        if context_latents is not None:
+            x = x[:, :main_len]
 
         if full_ref is not None:
             x = x[:, full_ref.shape[1]:]
@@ -588,7 +626,7 @@ class WanModel(torch.nn.Module):
         x = self.unpatchify(x, grid_sizes)
         return x
 
-    def rope_encode(self, t, h, w, t_start=0, steps_t=None, steps_h=None, steps_w=None, device=None, dtype=None, transformer_options={}):
+    def rope_encode(self, t, h, w, t_start=0, steps_t=None, steps_h=None, steps_w=None, device=None, dtype=None, transformer_options={}, source_id=0):
         patch_size = self.patch_size
         t_len = ((t + (patch_size[0] // 2)) // patch_size[0])
         h_len = ((h + (patch_size[1] // 2)) // patch_size[1])
@@ -620,6 +658,13 @@ class WanModel(torch.nn.Module):
         img_ids = img_ids.reshape(1, -1, img_ids.shape[-1])
 
         freqs = self.rope_embedder(img_ids).movedim(1, 2)
+
+        # In-context reference: a non-zero source_id composes an extra rotation into the spatial rope
+        if source_id:
+            d = self.dim // self.num_heads
+            pos = torch.tensor([[float(source_id)]], device=freqs.device, dtype=torch.float32)
+            id_rot = rope(pos, d, self.rope_embedder.theta).reshape(1, 1, 1, d // 2, 2, 2).to(freqs.dtype)
+            freqs = torch.einsum('...ij,...jk->...ik', freqs, id_rot)
         return freqs
 
     def forward(self, x, timestep, context, clip_fea=None, time_dim_concat=None, transformer_options={}, **kwargs):
@@ -643,6 +688,15 @@ class WanModel(torch.nn.Module):
             t_len += 1
 
         freqs = self.rope_encode(t_len, h, w, device=x.device, dtype=x.dtype, transformer_options=transformer_options)
+
+        # In-context reference: one rope block per stream, each with it's own source_id (1, 2, ...) to distinguish from the target (id 0).
+        context_latents = kwargs.get("context_latents", None)
+        if context_latents is not None:
+            context_latents = [comfy.ldm.common_dit.pad_to_patch_size(lat, self.patch_size) for lat in context_latents]
+            for i, lat in enumerate(context_latents):
+                freqs = torch.cat([freqs, self.rope_encode(lat.shape[-3], lat.shape[-2], lat.shape[-1], device=x.device, dtype=x.dtype, transformer_options=transformer_options, source_id=i + 1)], dim=1)
+            kwargs = {**kwargs, "context_latents": context_latents}
+
         return self.forward_orig(x, timestep, context, clip_fea=clip_fea, freqs=freqs, transformer_options=transformer_options, **kwargs)[:, :, :t, :h, :w]
 
     def unpatchify(self, x, grid_sizes):
@@ -732,8 +786,10 @@ class VaceWanModel(WanModel):
         **kwargs,
     ):
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
+        transformer_options["grid_sizes"] = grid_sizes
         x = x.flatten(2).transpose(1, 2)
 
         # time embeddings
@@ -761,8 +817,12 @@ class VaceWanModel(WanModel):
         x_orig = x
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
+        transformer_options["total_blocks"] = len(self.blocks)
+        transformer_options["block_type"] = "double"
         for i, block in enumerate(self.blocks):
+            transformer_options["block_index"] = i
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args):
                     out = {}
@@ -772,6 +832,11 @@ class VaceWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
 
             ii = self.vace_layers_mapping.get(i, None)
             if ii is not None:
@@ -838,6 +903,7 @@ class CameraWanModel(WanModel):
         **kwargs,
     ):
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         if self.control_adapter is not None and camera_conditions is not None:
             x = x + self.control_adapter(camera_conditions).to(x.dtype)
@@ -860,8 +926,12 @@ class CameraWanModel(WanModel):
             context_img_len = clip_fea.shape[-2]
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
+        transformer_options["total_blocks"] = len(self.blocks)
+        transformer_options["block_type"] = "double"
         for i, block in enumerate(self.blocks):
+            transformer_options["block_index"] = i
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args):
                     out = {}
@@ -871,6 +941,11 @@ class CameraWanModel(WanModel):
                 x = out["img"]
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
 
         # head
         x = self.head(x, e)
@@ -1110,7 +1185,7 @@ class AudioInjector_WAN(nn.Module):
                 self.injector_adain_output_layers = nn.ModuleList(
                     [operations.Linear(dim, dim, dtype=dtype, device=device) for _ in range(audio_injector_id)])
 
-    def forward(self, x, block_id, audio_emb, audio_emb_global, seq_len):
+    def forward(self, x, block_id, audio_emb, audio_emb_global, seq_len, scale=1.0):
         audio_attn_id = self.injected_block_id.get(block_id, None)
         if audio_attn_id is None:
             return x
@@ -1123,12 +1198,15 @@ class AudioInjector_WAN(nn.Module):
             attn_hidden_states = adain_hidden_states
         else:
             attn_hidden_states = self.injector_pre_norm_feat[audio_attn_id](input_hidden_states)
-        audio_emb = rearrange(audio_emb, "b t n c -> (b t) n c", t=num_frames)
-        attn_audio_emb = audio_emb
+
+        if audio_emb.dim() == 3: # WanDancer case
+            attn_audio_emb = rearrange(audio_emb, "b t c -> (b t) 1 c", t=num_frames)
+        else: # S2V case
+            attn_audio_emb = rearrange(audio_emb, "b t n c -> (b t) n c", t=num_frames)
+
         residual_out = self.injector[audio_attn_id](x=attn_hidden_states, context=attn_audio_emb)
-        residual_out = rearrange(
-            residual_out, "(b t) n c -> b (t n) c", t=num_frames)
-        x[:, :seq_len] = x[:, :seq_len] + residual_out
+        residual_out = rearrange(residual_out, "(b t) n c -> b (t n) c", t=num_frames)
+        x[:, :seq_len] = x[:, :seq_len] + residual_out * scale
         return x
 
 
@@ -1280,6 +1358,7 @@ class WanModel_S2V(WanModel):
 
         # embeddings
         bs, _, time, height, width = x.shape
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         if control_video is not None:
             x = x + self.cond_encoder(control_video)
@@ -1324,17 +1403,27 @@ class WanModel_S2V(WanModel):
         context = self.text_embedding(context)
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
+        transformer_options["total_blocks"] = len(self.blocks)
+        transformer_options["block_type"] = "double"
         for i, block in enumerate(self.blocks):
+            transformer_options["block_index"] = i
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args):
                     out = {}
-                    out["img"] = block(args["img"], context=args["txt"], e=args["vec"], freqs=args["pe"])
+                    out["img"] = block(args["img"], context=args["txt"], e=args["vec"], freqs=args["pe"], transformer_options=args["transformer_options"])
                     return out
-                out = blocks_replace[("double_block", i)]({"img": x, "txt": context, "vec": e0, "pe": freqs}, {"original_block": block_wrap})
+                out = blocks_replace[("double_block", i)]({"img": x, "txt": context, "vec": e0, "pe": freqs, "transformer_options": transformer_options}, {"original_block": block_wrap})
                 x = out["img"]
             else:
-                x = block(x, e=e0, freqs=freqs, context=context)
+                x = block(x, e=e0, freqs=freqs, context=context, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
+
             if audio_emb is not None:
                 x = self.audio_injector(x, i, audio_emb, audio_emb_global, seq_len)
         # head
@@ -1541,6 +1630,7 @@ class HumoWanModel(WanModel):
         bs, _, time, height, width = x.shape
 
         # embeddings
+        x_input = x
         x = self.patch_embedding(x.float()).to(x.dtype)
         grid_sizes = x.shape[2:]
         x = x.flatten(2).transpose(1, 2)
@@ -1572,8 +1662,12 @@ class HumoWanModel(WanModel):
             audio = None
 
         patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
         blocks_replace = patches_replace.get("dit", {})
+        transformer_options["total_blocks"] = len(self.blocks)
+        transformer_options["block_type"] = "double"
         for i, block in enumerate(self.blocks):
+            transformer_options["block_index"] = i
             if ("double_block", i) in blocks_replace:
                 def block_wrap(args):
                     out = {}
@@ -1584,9 +1678,187 @@ class HumoWanModel(WanModel):
             else:
                 x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, audio=audio, transformer_options=transformer_options)
 
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": 0, "transformer_options": transformer_options})
+                    x = out["img"]
+
         # head
         x = self.head(x, e)
 
         # unpatchify
         x = self.unpatchify(x, grid_sizes)
         return x
+
+class SCAILWanModel(WanModel):
+    def __init__(self, model_type="scail", patch_size=(1, 2, 2), in_dim=20, dim=5120, operations=None, device=None, dtype=None, **kwargs):
+        super().__init__(model_type='i2v', patch_size=patch_size, in_dim=in_dim, dim=dim, operations=operations, device=device, dtype=dtype, **kwargs)
+
+        self.patch_embedding_pose = operations.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size, device=device, dtype=torch.float32)
+
+    def forward_orig(self, x, t, context, clip_fea=None, freqs=None, transformer_options={}, pose_latents=None, reference_latent=None, ref_mask_latents=None, sam_latents=None, **kwargs):
+
+        x_input = x
+
+        img_offset = 0
+        if reference_latent is not None:
+            x = torch.cat((reference_latent, x), dim=2)
+            img_offset = (reference_latent.shape[2] // self.patch_size[0]) * \
+                         (reference_latent.shape[3] // self.patch_size[1]) * \
+                         (reference_latent.shape[4] // self.patch_size[2])
+
+        # embeddings
+        x = self.patch_embedding(x.float()).to(x.dtype)
+        if ref_mask_latents is not None:  # SCAIL-2 additive mask stream (one identity mask frame per reference, then video)
+            x = x + self.patch_embedding_mask(ref_mask_latents.float()).to(x.dtype)
+        grid_sizes = x.shape[2:]
+        transformer_options["grid_sizes"] = grid_sizes
+        x = x.flatten(2).transpose(1, 2)
+
+        scail_pose_seq_len = 0
+        if pose_latents is not None:
+            scail_x = self.patch_embedding_pose(pose_latents.float()).to(x.dtype)
+            if sam_latents is not None:  # SCAIL-2 additive mask stream
+                scail_x = scail_x + self.patch_embedding_mask(sam_latents.float()).to(x.dtype)
+            scail_x = scail_x.flatten(2).transpose(1, 2)
+            scail_pose_seq_len = scail_x.shape[1]
+            x = torch.cat([x, scail_x], dim=1)
+            del scail_x
+
+        # time embeddings
+        e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t.flatten()).to(dtype=x[0].dtype))
+        e = e.reshape(t.shape[0], -1, e.shape[-1])
+        e0 = self.time_projection(e).unflatten(2, (6, self.dim))
+
+        # context
+        context = self.text_embedding(context)
+
+        context_img_len = None
+        if clip_fea is not None:
+            if self.img_emb is not None:
+                context_clip = self.img_emb(clip_fea)  # bs x 257 x dim
+                context = torch.cat([context_clip, context], dim=1)
+            context_img_len = clip_fea.shape[-2]
+
+        patches_replace = transformer_options.get("patches_replace", {})
+        patches = transformer_options.get("patches", {})
+        blocks_replace = patches_replace.get("dit", {})
+        transformer_options["total_blocks"] = len(self.blocks)
+        transformer_options["block_type"] = "double"
+        for i, block in enumerate(self.blocks):
+            transformer_options["block_index"] = i
+            if ("double_block", i) in blocks_replace:
+                def block_wrap(args):
+                    out = {}
+                    out["img"] = block(args["img"], context=args["txt"], e=args["vec"], freqs=args["pe"], context_img_len=context_img_len, transformer_options=args["transformer_options"])
+                    return out
+                out = blocks_replace[("double_block", i)]({"img": x, "txt": context, "vec": e0, "pe": freqs, "transformer_options": transformer_options}, {"original_block": block_wrap})
+                x = out["img"]
+            else:
+                x = block(x, e=e0, freqs=freqs, context=context, context_img_len=context_img_len, transformer_options=transformer_options)
+
+            if "double_block" in patches:
+                for p in patches["double_block"]:
+                    out = p({"img": x, "x": x_input, "vec": e, "block_index": i, "img_offset": img_offset, "transformer_options": transformer_options})
+                    x = out["img"]
+
+        # head
+        x = self.head(x, e)
+
+        if scail_pose_seq_len > 0:
+            x = x[:, :-scail_pose_seq_len]
+
+        # unpatchify
+        x = self.unpatchify(x, grid_sizes)
+
+        if reference_latent is not None:
+            x = x[:, :, reference_latent.shape[2]:]
+
+        return x
+
+    # ref_mask_flag is a scalar bool (CONDConstant, SCAIL-2 only). False => replacement mode,
+    # which places ref/pose via H/W rope shifts instead of the animation-mode temporal offset.
+    # reference_latent may stack several frames: the last is the primary reference adjacent to the video, the earlier frames are additional references.
+    def rope_encode(self, t, h, w, t_start=0, steps_t=None, steps_h=None, steps_w=None, device=None, dtype=None, pose_latents=None, reference_latent=None, ref_mask_flag=None, transformer_options={}):
+        ref_t_patches = 0
+        if reference_latent is not None:
+            ref_t_patches = (reference_latent.shape[2] + (self.patch_size[0] // 2)) // self.patch_size[0]
+
+        if ref_mask_flag is not None and not bool(ref_mask_flag):
+            REF_ROPE_H = 120.0
+            POSE_ROPE_W = 120.0
+
+            main_t_patches = t - ref_t_patches
+            video_t_start = max(ref_t_patches - 1, 0)
+
+            parts = []
+            if ref_t_patches > 0:
+                ref_tf = {"rope_options": {"shift_y": REF_ROPE_H, "shift_x": 0.0, "scale_y": 1.0, "scale_x": 1.0}}
+                parts.append(super().rope_encode(ref_t_patches, h, w, t_start=0, device=device, dtype=dtype, transformer_options=ref_tf))
+            if main_t_patches > 0:
+                parts.append(super().rope_encode(main_t_patches, h, w, t_start=video_t_start, device=device, dtype=dtype, transformer_options=transformer_options))
+
+            if pose_latents is not None:
+                F_pose, H_pose, W_pose = pose_latents.shape[-3], pose_latents.shape[-2], pose_latents.shape[-1]
+                h_scale = h / H_pose
+                w_scale = w / W_pose
+                h_shift = (h_scale - 1) / 2
+                w_shift = (w_scale - 1) / 2
+                pose_tf = {"rope_options": {"shift_y": h_shift, "shift_x": POSE_ROPE_W + w_shift, "scale_y": h_scale, "scale_x": w_scale}}
+                parts.append(super().rope_encode(F_pose, H_pose, W_pose, t_start=video_t_start, device=device, dtype=dtype, transformer_options=pose_tf))
+
+            return torch.cat(parts, dim=1)
+
+        main_freqs = super().rope_encode(t, h, w, t_start=t_start, steps_t=steps_t, steps_h=steps_h, steps_w=steps_w, device=device, dtype=dtype, transformer_options=transformer_options)
+
+        if pose_latents is None:
+            return main_freqs
+
+        F_pose, H_pose, W_pose = pose_latents.shape[-3], pose_latents.shape[-2], pose_latents.shape[-1]
+
+        # if pose is at half resolution, scale_y/scale_x=2 stretches the position range to cover the same RoPE extent as the main frames
+        h_scale = h / H_pose
+        w_scale = w / W_pose
+
+        # 120 w-offset and shift 0.5 to place positions at midpoints (0.5, 2.5, ...) to match the original code
+        h_shift = (h_scale - 1) / 2
+        w_shift = (w_scale - 1) / 2
+        pose_transformer_options = {"rope_options": {"shift_y": h_shift, "shift_x": 120.0 + w_shift, "scale_y": h_scale, "scale_x": w_scale}}
+        pose_freqs = super().rope_encode(F_pose, H_pose, W_pose, t_start=t_start+ref_t_patches, device=device, dtype=dtype, transformer_options=pose_transformer_options)
+
+        return torch.cat([main_freqs, pose_freqs], dim=1)
+
+    def _forward(self, x, timestep, context, clip_fea=None, time_dim_concat=None, transformer_options={}, pose_latents=None, ref_mask_latents=None, sam_latents=None, **kwargs):
+        bs, c, t, h, w = x.shape
+        x = comfy.ldm.common_dit.pad_to_patch_size(x, self.patch_size)
+
+        if pose_latents is not None:
+            pose_latents = comfy.ldm.common_dit.pad_to_patch_size(pose_latents, self.patch_size)
+        if ref_mask_latents is not None:  # SCAIL-2
+            ref_mask_latents = comfy.ldm.common_dit.pad_to_patch_size(ref_mask_latents, self.patch_size)
+        if sam_latents is not None:  # SCAIL-2
+            sam_latents = comfy.ldm.common_dit.pad_to_patch_size(sam_latents, self.patch_size)
+
+        t_len = t
+        if time_dim_concat is not None:
+            time_dim_concat = comfy.ldm.common_dit.pad_to_patch_size(time_dim_concat, self.patch_size)
+            x = torch.cat([x, time_dim_concat], dim=2)
+            t_len = x.shape[2]
+
+        reference_latent = None
+        if "reference_latent" in kwargs:
+            reference_latent = comfy.ldm.common_dit.pad_to_patch_size(kwargs.pop("reference_latent"), self.patch_size)
+            t_len += reference_latent.shape[2]
+
+        ref_mask_flag = kwargs.pop("ref_mask_flag", None)  # SCAIL-2
+
+        freqs = self.rope_encode(t_len, h, w, device=x.device, dtype=x.dtype, transformer_options=transformer_options, pose_latents=pose_latents, reference_latent=reference_latent, ref_mask_flag=ref_mask_flag)
+        return self.forward_orig(x, timestep, context, clip_fea=clip_fea, freqs=freqs, transformer_options=transformer_options, pose_latents=pose_latents, reference_latent=reference_latent, ref_mask_latents=ref_mask_latents, sam_latents=sam_latents, **kwargs)[:, :, :t, :h, :w]
+
+
+class SCAIL2WanModel(SCAILWanModel):
+    """SCAIL-2: SCAIL-Preview + an additive binary multi-identity mask stream."""
+
+    def __init__(self, model_type="scail2", patch_size=(1, 2, 2), in_dim=20, mask_in_dim=28, dim=5120, operations=None, device=None, dtype=None, **kwargs):
+        super().__init__(model_type=model_type, patch_size=patch_size, in_dim=in_dim, dim=dim, operations=operations, device=device, dtype=dtype, **kwargs)
+        self.patch_embedding_mask = operations.Conv3d(mask_in_dim, dim, kernel_size=patch_size, stride=patch_size, device=device, dtype=torch.float32)
